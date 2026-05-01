@@ -1,0 +1,27 @@
+name: "Cron: Actor Disambiguation"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  who-am-i:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Actor info
+        run: |
+          echo "=== Actor ==="
+          echo "actor:            ${{ github.actor }}"
+          echo "triggering_actor: ${{ github.triggering_actor }}"
+          echo "event:            ${{ github.event_name }}"
+          echo "sha:              ${{ github.sha }}"
+
+      - name: Last modifier of this file
+        run: |
+          git log -1 --format='%H %an <%ae> %s' -- .github/workflows/cron-actor-disambiguate.yml
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .
