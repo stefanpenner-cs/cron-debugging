@@ -1,224 +1,199 @@
 # cron-debugging
 
-Building a model of how GitHub Actions internally represents and executes cron schedules — the entities, relationships, state transitions, and API surface. Every claim below is backed by data from `probe-endpoints.js` or workflow run output.
+How GitHub Actions internally represents and executes cron schedules. Every claim backed by an API probe or workflow run.
 
-## Internal Model (verified by API probes)
+All paths below are relative to `/repos/stefanpenner-cs/cron-debugging`. Full request/response details in [`api-endpoints.md`](api-endpoints.md).
+
+## Findings
+
+### Are cron schedules visible via the API?
+
+**No.** The workflow object has no schedule field. You must parse the YAML or wait for a run and check `event.schedule`.
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800
+```
+```json
+{ "id": 269650800, "name": "Cron: Basic Every 5 Min", "path": ".github/workflows/cron-basic.yml",
+  "state": "active", "created_at": "...", "updated_at": "..." }
+```
+No cron expression anywhere in the response. [Full response](api-endpoints.md#get-a-single-workflow)
+
+### Can you address a workflow by filename?
+
+**Yes.** Both return identical bodies and the same ETag:
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800
+gh api repos/stefanpenner-cs/cron-debugging/actions/workflows/cron-basic.yml
+```
+Both → `200`, ETag: `W/"454f5525e904fb95bad4ea8303eaa14d5e53001bfb2360041eea8d3650d589e9"`. [Evidence](api-endpoints.md#get-workflow-by-filename)
+
+### How do you detect if crons are firing?
+
+Filter runs by `event=schedule`. Zero results = crons haven't fired.
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs?event=schedule\&per_page=3
+```
+```json
+{ "total_count": 0, "workflow_runs": [] }
+```
+[Evidence](api-endpoints.md#list-workflow-runs-schedule-only)
+
+### What does the workflow state machine look like?
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ Repository                                                          │
-│   id: 1226767947                                                    │
-│   owner.type: "Organization"      ◄── verified via GET /actions/runs│
-│   private: true                                                     │
-│                                                                     │
-│ ┌─────────────────────────────────────────────────────────────────┐  │
-│ │ Workflow  (one per .yml file)                                   │  │
-│ │   id: 269650800                  ◄── numeric, stable            │  │
-│ │   node_id: "W_kwDOSR7-S84QEotw" ◄── GraphQL ID                │  │
-│ │   name: "Cron: Basic Every 5 Min"                               │  │
-│ │   path: ".github/workflows/cron-basic.yml"                      │  │
-│ │   state: "active"                ◄── also: disabled_manually,   │  │
-│ │                                       disabled_inactivity       │  │
-│ │   created_at / updated_at        ◄── updated_at changes on     │  │
-│ │                                       enable/disable, NOT on    │  │
-│ │                                       file edit                 │  │
-│ │                                                                 │  │
-│ │   Addressable by numeric ID OR filename:                        │  │
-│ │     GET /actions/workflows/269650800      ◄── verified: 200     │  │
-│ │     GET /actions/workflows/cron-basic.yml ◄── verified: 200     │  │
-│ │     Both return identical response body + same ETag             │  │
-│ │                                                                 │  │
-│ │   badge_url: workflows/Cron%3A+Basic+Every+5+Min/badge.svg     │  │
-│ │                                                                 │  │
-│ │ ┌───────────────────────────────────────────────────────────┐   │  │
-│ │ │ Schedule Trigger(s)                                       │   │  │
-│ │ │   NOT visible in the API — only parsed from the YAML.     │   │  │
-│ │ │   The API has no "list schedules for a workflow" endpoint. │   │  │
-│ │ │   You must parse the .yml file or check event.schedule    │   │  │
-│ │ │   on a run that already fired.                            │   │  │
-│ │ └───────────────────────────────────────────────────────────┘   │  │
-│ └─────────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│ ┌─────────────────────────────────────────────────────────────────┐  │
-│ │ Workflow Run                                                    │  │
-│ │   id: 25231636888                                               │  │
-│ │   event: "workflow_dispatch" | "schedule" | "workflow_run"      │  │
-│ │   status: "queued" | "in_progress" | "completed"                │  │
-│ │   conclusion: null | "success" | "failure" | "cancelled"        │  │
-│ │                                                                 │  │
-│ │   actor.login: "stefanpenner"    ◄── full User object (19 keys)│  │
-│ │   actor.type: "User"                                            │  │
-│ │   triggering_actor: (same object for schedule/dispatch)         │  │
-│ │                                                                 │  │
-│ │   head_branch: "main"                                           │  │
-│ │   head_sha: "cafefe8..."                                        │  │
-│ │   head_commit.author.name + .email                              │  │
-│ │   head_commit.committer.name + .email                           │  │
-│ │                                                                 │  │
-│ │   Navigational URLs (verified — all return valid responses):    │  │
-│ │     jobs_url, logs_url, artifacts_url,                          │  │
-│ │     cancel_url, rerun_url, check_suite_url, workflow_url        │  │
-│ │   previous_attempt_url: null (populated on retry)               │  │
-│ │   run_attempt: 1 (increments on retry)                          │  │
-│ │   run_duration_ms: 18000 (from /timing endpoint)                │  │
-│ └─────────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│ ┌─────────────────────────────────────────────────────────────────┐  │
-│ │ Job (within a Run)                                              │  │
-│ │   id: 73988338415                                               │  │
-│ │   name: "react-to-cron"          ◄── from the `jobs:` key      │  │
-│ │   status/conclusion: same enum as Run                           │  │
-│ │   created_at → started_at → completed_at                        │  │
-│ │     (created != started — queue wait time is the gap)            │  │
-│ │                                                                 │  │
-│ │   runner_id: 1000000136                                         │  │
-│ │   runner_name: "GitHub Actions 1000000136"                      │  │
-│ │   labels: ["ubuntu-latest"]                                     │  │
-│ │                                                                 │  │
-│ │   steps[]: array of {name, status, conclusion, number,          │  │
-│ │            started_at, completed_at}                             │  │
-│ │     - includes synthetic "Set up job" and "Complete job" steps   │  │
-│ │     - conclusion can be "skipped" (for `if:` conditions)        │  │
-│ └─────────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│ ┌─────────────────────────────────────────────────────────────────┐  │
-│ │ Permissions (two layers)                                        │  │
-│ │                                                                 │  │
-│ │   Repo-level (GET /actions/permissions):                        │  │
-│ │     enabled: true                                               │  │
-│ │     allowed_actions: "all"                                      │  │
-│ │     sha_pinning_required: false                                 │  │
-│ │                                                                 │  │
-│ │   Token-level (GET /actions/permissions/workflow):               │  │
-│ │     default_workflow_permissions: "write"                        │  │
-│ │     can_approve_pull_request_reviews: false                     │  │
-│ │                                                                 │  │
-│ │   Effective = min(repo default, workflow `permissions:` block,  │  │
-│ │                    actor's repo access)                          │  │
-│ └─────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+"active" ──disable──► "disabled_manually"  (204)
+"disabled_manually" ──enable──► "active"   (204)
+"active" ──(60 days no push)──► "disabled_inactivity"  (docs, not yet testable)
 ```
 
-### State transitions (verified)
-
-```
-Workflow.state:
-  "active" ──(PUT /workflows/{id}/disable)──► "disabled_manually"   ← verified: 204
-  "active" ──(60 days no push)──────────────► "disabled_inactivity" ← from docs, not yet testable
-  "disabled_manually" ──(PUT /workflows/{id}/enable)──► "active"    ← verified: 204
-  "disabled_inactivity" ──(PUT /workflows/{id}/enable)──► "active"  ← from docs
-
-Workflow Run lifecycle:
-  (created) → status:"queued" → status:"in_progress" → status:"completed"
-                                                        conclusion: success|failure|cancelled
+```sh
+gh api -X PUT repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800/disable
+gh api -X PUT repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800/enable
 ```
 
-## Verified Findings from API Probes
+Both disable and enable are idempotent, return 204 with empty body. [Disable](api-endpoints.md#disable-a-workflow) | [Enable](api-endpoints.md#enable-a-workflow)
 
-Each finding references the endpoint and actual response that confirmed it.
+### Who is the `actor` on a workflow run?
 
-### 1. Workflow identity
+`actor` and `triggering_actor` are **full User objects** (19 keys), not strings. For dispatch and chained (`workflow_run`) events, both point to the user who initiated the chain.
 
-- **Workflows are addressable by numeric ID or filename.** Both `GET /actions/workflows/269650800` and `GET /actions/workflows/cron-basic.yml` return 200 with identical bodies and the same ETag. *(Verified: probe run 2026-05-01)*
-- **The workflow object has 9 fields:** `id`, `node_id`, `name`, `path`, `state`, `created_at`, `updated_at`, `url`, `html_url`, `badge_url`. *(Verified: probe)*
-- **`state` is the key field for monitoring.** Values: `active`, `disabled_manually`, `disabled_inactivity`. *(Verified: disable→enable cycle returned 204 both ways, and GET confirmed state change)*
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672
+```
+```json
+{ "event": "workflow_run", "actor": "{19-key User object}", "triggering_actor": "{19-key User object}" }
+```
+[Evidence](api-endpoints.md#get-a-single-workflow-run) | [Run in UI](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672)
 
-### 2. Workflow runs and actor attribution
+### How do you see queue wait time?
 
-- **`actor` and `triggering_actor` are full User objects** (19 keys each: login, id, avatar_url, etc.), not just strings. *(Verified: GET /actions/runs/{id})*
-- **For workflow_dispatch runs, actor = triggering_actor = the user who dispatched.** Both showed `stefanpenner` (id: 1377). *(Verified: probe)*
-- **For workflow_run (chained) runs, actor = triggering_actor = the user whose dispatch triggered the upstream workflow.** The chain preserves the original actor. *(Verified: chained alerting run showed same actor as the dispatch that triggered it)*
-- **`head_commit` embeds both `author` and `committer`** with name + email. For cron, this is the HEAD commit on the default branch, not necessarily the person who last touched the workflow file. *(Verified: head_commit.author = "Stefan Penner" \<stef@iamstef.net\>)*
-- **Runs always target the default branch.** `head_branch: "main"`, `head_sha` = HEAD of main at run creation time. *(Verified: all runs show head_branch: "main")*
+Compare `created_at` vs `started_at` on the job. The gap is queue wait.
 
-### 3. Job and step detail
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415
+```
+```json
+{ "created_at": "2026-05-01T20:25:18Z", "started_at": "2026-05-01T20:25:29Z",
+  "completed_at": "2026-05-01T20:25:34Z", "runner_id": 1000000136,
+  "runner_name": "GitHub Actions 1000000136", "labels": ["ubuntu-latest"] }
+```
+11s queue wait. [Evidence](api-endpoints.md#get-a-single-job) | [Job in UI](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672/job/73988338415)
 
-- **Jobs have queue wait time visible in the timestamps.** `created_at: 20:25:18Z`, `started_at: 20:25:29Z` = 11 seconds queue wait. *(Verified: GET /actions/jobs/{id})*
-- **Steps include synthetic entries.** GitHub injects `"Set up job"` (step 1) and `"Complete job"` (last step) around your defined steps. *(Verified: 6 steps returned for 4 user-defined steps)*
-- **`if:` conditions produce `conclusion: "skipped"`.** The `Alert on failure` step (gated on `github.event.workflow_run.conclusion == 'failure'`) showed conclusion `"skipped"` when the upstream succeeded. *(Verified: step 3 in chained alerting job)*
-- **Runner info is exposed.** `runner_id`, `runner_name`, `runner_group_id`, `runner_group_name` are all present. *(Verified)*
+### Does GitHub inject synthetic steps?
 
-### 4. Logs
+**Yes.** 4 user-defined steps → 6 returned. GitHub adds `"Set up job"` (step 1) and `"Complete job"` (last). Steps gated on `if:` conditions show `conclusion: "skipped"`.
 
-- **Log download returns a zip file** via Content-Disposition header: `attachment; filename=logs_67114071363.zip`. Content-Type: `application/zip`. *(Verified: GET /actions/runs/{id}/logs → 200)*
-- **Logs are only available for completed runs.** A GET on an in-progress run's logs returns 404. *(Verified: first probe attempt hit 404 on a queued run)*
-- **The response comes from a different backend** (`x-github-backend: Kubernetes`) than the main API (no such header), suggesting logs are served from a separate storage system.
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415 --jq '.steps'
+```
+[Evidence](api-endpoints.md#get-a-single-job)
 
-### 5. Timing and billing
+### How do logs work?
 
-- **`GET /actions/runs/{id}/timing`** returns `run_duration_ms` (wall clock) and `billable` broken down by OS. *(Verified: run_duration_ms: 18000, billable.UBUNTU.total_ms: 0, jobs: 1)*
-- **Billable time can be 0 even for completed runs.** Short runs on public repos or within free-tier don't accrue billing. *(Verified)*
+Zip download. 404 if the run isn't complete yet. Served from a different backend (`x-github-backend: Kubernetes`).
 
-### 6. Enable/disable control
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672/logs > logs.zip
+```
+```
+Content-Disposition: attachment; filename=logs_67114071363.zip
+Content-Type: application/zip
+```
+[Evidence](api-endpoints.md#download-workflow-run-logs)
 
-- **Disable and enable are idempotent PUT endpoints** returning 204 with empty body. *(Verified: both returned 204)*
-- **Disable/enable require `actions:write` scope** on the token. The default `GITHUB_TOKEN` in a cron run only has `actions:read`, so a cron cannot disable/enable itself without an explicit `permissions` block or a PAT. *(Verified: `x-accepted-oauth-scopes: ""` on these endpoints, but `x-oauth-scopes` on our PAT included repo)*
+### How do you get billing/timing info?
 
-### 7. Dispatch
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672/timing
+```
+```json
+{ "run_duration_ms": 18000, "billable": { "UBUNTU": { "total_ms": 0, "jobs": 1 } } }
+```
+Billable can be 0 for short runs / free tier. [Evidence](api-endpoints.md#get-workflow-run-usagetiming)
 
-- **`POST /actions/workflows/{id}/dispatches` is deprecated.** Response headers: `deprecation: Tue, 10 Mar 2026`, `sunset: Fri, 10 Mar 2028`. The `link` header points to the API versions doc. *(Verified: probe captured deprecation headers)*
-- **Dispatch returns 204 with empty body.** There is no run ID in the response — you must poll `GET /actions/runs` to find the newly created run. *(Verified)*
-- **`workflow_run` chaining works.** Our chained alerting workflow fired within 15 seconds of the dispatched basic workflow completing. *(Verified: basic completed at ~20:25:15, chained created at 20:25:17)*
+### Is `POST /dispatches` deprecated?
 
-### 8. Repository-level permissions
+**Yes.** Response headers confirm:
 
-- **`GET /actions/permissions`** returns: `enabled: true`, `allowed_actions: "all"`, `sha_pinning_required: false`. This controls whether Actions can run at all and which actions are permitted. *(Verified)*
-- **`GET /actions/permissions/workflow`** returns: `default_workflow_permissions: "write"`, `can_approve_pull_request_reviews: false`. This is the baseline for `GITHUB_TOKEN` — individual workflows can only restrict further, not expand. *(Verified)*
+```sh
+gh api -X POST repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800/dispatches -f ref=main
+```
+```
+204 (empty body)
+deprecation: Tue, 10 Mar 2026 00:00:00 GMT
+sunset: Fri, 10 Mar 2028 00:00:00 GMT
+```
+No run ID returned — you must poll `/actions/runs` to find the new run. [Evidence](api-endpoints.md#create-workflow-dispatch-event)
 
-### 9. Pagination
+### Does `workflow_run` chaining work?
 
-- **Run listing uses `Link` header pagination.** `GET /actions/runs?per_page=3` returned `link: <...?page=2>; rel="next", <...?page=2>; rel="last"`. *(Verified)*
-- **Pagination uses repository numeric ID in the URL** (`/repositories/1226767947/actions/runs`), not the owner/repo slug. *(Verified: Link header)*
+**Yes.** Basic workflow completed at ~20:25:15, chained alerting created at 20:25:17 (2s latency).
 
-### 10. Caching
+[Basic run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231636888) | [Chained run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672)
 
-- **All GET responses include cache headers.** `cache-control: private, max-age=60, s-maxage=60`, `etag: W/"..."`, `vary: Accept, Authorization, Cookie, ...`. *(Verified: consistent across all GET endpoints)*
-- **Write endpoints (PUT, POST) do not return cache headers.** *(Verified: disable/enable/dispatch responses have no cache-control or etag)*
+### What are the default token permissions?
 
-## Not Yet Verified (needs schedule-triggered runs)
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/permissions
+```
+```json
+{ "enabled": true, "allowed_actions": "all", "sha_pinning_required": false }
+```
 
-These require actual `event: "schedule"` runs, which haven't fired yet (crons are best-effort and can take 10+ min on a new repo):
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/permissions/workflow
+```
+```json
+{ "default_workflow_permissions": "write", "can_approve_pull_request_reviews": false }
+```
+[Permissions](api-endpoints.md#get-default-workflow-permissions) | [Token](api-endpoints.md#get-default-github_token-permissions)
 
-- [ ] **`github.event.schedule` contains the cron expression that fired** — need a schedule run to confirm the event payload shape
-- [ ] **`actor` for schedule runs = last committer to the workflow file** — need to compare actor.login against `git log` for the workflow file
-- [ ] **Multi-schedule: `event.schedule` distinguishes which expression fired** — need `cron-multi-schedule.yml` to fire
-- [ ] **60-day inactivity auto-disable** — need to observe `state: "disabled_inactivity"` on a stale repo
-- [ ] **Merger vs. PR author as actor** — need a PR-based workflow file change to test
-- [ ] **Actor permission downgrade on ownership transfer** — need a second user to modify the workflow file
+### How does pagination work?
+
+`Link` header with `rel="next"` / `rel="last"`. URLs use the numeric repo ID, not the slug.
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs?per_page=3 --include 2>&1 | grep -i link
+```
+```
+link: <https://api.github.com/repositories/1226767947/actions/runs?per_page=3&page=2>; rel="next", ...
+```
+[Evidence](api-endpoints.md#list-workflow-runs-for-repo)
+
+### Caching behavior?
+
+All GETs: `cache-control: private, max-age=60, s-maxage=60` + ETag + Vary.
+All writes (PUT/POST): no cache headers. [Evidence](api-endpoints.md)
+
+## Not yet verified
+
+Requires actual `event: "schedule"` runs:
+
+- `github.event.schedule` contains the cron expression that fired
+- `actor` for schedule runs = last committer to the workflow file
+- Multi-schedule: `event.schedule` distinguishes which expression fired
+- 60-day inactivity auto-disable (`state: "disabled_inactivity"`)
 
 ## Workflows
 
 | File | Purpose |
 |------|---------|
-| `cron-basic.yml` | Dumps full event context every 5 min |
-| `cron-multi-schedule.yml` | Tests which cron expression fired |
-| `cron-ownership-test.yml` | Deep dive on actor/ownership attribution |
-| `cron-staleness-monitor.yml` | Hourly check: have other crons fired recently? Detects silent failures |
-| `cron-chained-alerting.yml` | `workflow_run` trigger — fires when a cron completes, enables failure alerting |
-| `cron-control-api.yml` | Manual dispatch: list workflows, parse schedules, check token permissions |
-| `cron-health-check.yml` | Manual dispatch: full diagnostic — YAML validity, actor audit, staleness, 60-day risk |
-| `cron-token-permissions.yml` | Tests GITHUB_TOKEN permission scoping under cron with explicit permissions block |
+| [`cron-basic.yml`](.github/workflows/cron-basic.yml) | Dumps full event context every 5 min |
+| [`cron-multi-schedule.yml`](.github/workflows/cron-multi-schedule.yml) | Tests which cron expression fired |
+| [`cron-ownership-test.yml`](.github/workflows/cron-ownership-test.yml) | Actor/ownership attribution |
+| [`cron-staleness-monitor.yml`](.github/workflows/cron-staleness-monitor.yml) | Hourly: have other crons fired recently? |
+| [`cron-chained-alerting.yml`](.github/workflows/cron-chained-alerting.yml) | `workflow_run` trigger for failure alerting |
+| [`cron-control-api.yml`](.github/workflows/cron-control-api.yml) | Manual dispatch: list workflows, parse schedules |
+| [`cron-health-check.yml`](.github/workflows/cron-health-check.yml) | Manual dispatch: full diagnostic |
+| [`cron-token-permissions.yml`](.github/workflows/cron-token-permissions.yml) | GITHUB_TOKEN permission scoping under cron |
 
-## API Endpoints
+## Probe
 
-Run `npm run probe` to probe all 18 endpoints and regenerate [`api-endpoints.md`](api-endpoints.md) with full request/response details including headers. Uses `gh auth token` by default; override with `GH_TOKEN` env var.
+```sh
+npm run probe    # hits 18 endpoints, regenerates api-endpoints.md
+```
 
-| Endpoint | Method | Status | Notes |
-|----------|--------|--------|-------|
-| `/actions/workflows` | GET | 200 | Returns all 8 workflows with `state` field |
-| `/actions/workflows/{id}` | GET | 200 | Also accepts filename as ID (same ETag) |
-| `/actions/runs` | GET | 200 | Paginated via `Link` header |
-| `/actions/runs?event=schedule` | GET | 200 | Key observability query (0 results = crons not firing) |
-| `/actions/workflows/{id}/runs` | GET | 200 | Per-workflow filtering |
-| `/actions/runs/{id}` | GET | 200 | Full run detail with actor objects |
-| `/actions/runs/{id}/jobs` | GET | 200 | Includes step-level status/timing |
-| `/actions/jobs/{id}` | GET | 200 | Runner info, queue wait visible |
-| `/actions/runs/{id}/logs` | GET | 200 | Returns zip; 404 if run not yet complete |
-| `/actions/runs/{id}/attempts/{n}` | GET | 200 | Same shape as run, scoped to attempt |
-| `/actions/runs/{id}/timing` | GET | 200 | `run_duration_ms` + billable breakdown by OS |
-| `/actions/workflows/{id}/dispatches` | POST | 204 | **Deprecated** (sunset 2028-03-10); no run ID in response |
-| `/actions/workflows/{id}/disable` | PUT | 204 | Idempotent; needs `actions:write` |
-| `/actions/workflows/{id}/enable` | PUT | 204 | Idempotent; recovery from disable |
-| `/actions/artifacts` | GET | 200 | Empty until a workflow uploads artifacts |
-| `/actions/permissions` | GET | 200 | `enabled`, `allowed_actions`, `sha_pinning_required` |
-| `/actions/permissions/workflow` | GET | 200 | `default_workflow_permissions: "write"` |
+Uses `gh auth token`; override with `GH_TOKEN` env var.
