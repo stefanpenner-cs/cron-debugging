@@ -1,11 +1,8 @@
 const { Octokit } = require("@octokit/rest");
+const { execSync } = require("child_process");
 const fs = require("fs");
 
-const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-if (!token) {
-  console.error("Set GH_TOKEN or GITHUB_TOKEN");
-  process.exit(1);
-}
+const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || execSync("gh auth token", { encoding: "utf-8" }).trim();
 
 const octokit = new Octokit({ auth: token });
 const OWNER = "stefanpenner-cs";
