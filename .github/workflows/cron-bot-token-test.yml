@@ -1,0 +1,175 @@
+name: "Cron: Bot Actor Token Test"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  default-permissions:
+    name: "Default permissions (no explicit block)"
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Actor info
+        run: |
+          echo "=== Actor ==="
+          echo "actor:            ${{ github.actor }}"
+          echo "triggering_actor: ${{ github.triggering_actor }}"
+          echo "event:            ${{ github.event_name }}"
+
+      - name: Test read operations
+        run: |
+          echo "--- Read operations ---"
+          echo -n "GET /contents (contents:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/.github/workflows"
+          echo ""
+
+          echo -n "GET /actions/workflows (actions:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows"
+          echo ""
+
+          echo -n "GET /issues (issues:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues"
+          echo ""
+
+      - name: Test write operations
+        run: |
+          echo "--- Write operations ---"
+
+          echo -n "POST /issues (issues:write): "
+          STATUS=$(curl -s -o /tmp/issue-resp.json -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X POST \
+            -d '{"title":"[bot-token-test] auto-delete","body":"Created by bot actor token test. Safe to delete."}' \
+            "https://api.github.com/repos/$REPO/issues")
+          echo "$STATUS"
+
+          if [ "$STATUS" = "201" ]; then
+            ISSUE_NUM=$(jq -r '.number' /tmp/issue-resp.json)
+            echo "  Created issue #$ISSUE_NUM — closing and deleting..."
+            curl -s -o /dev/null -w "  PATCH /issues/$ISSUE_NUM (close): %{http_code}\n" \
+              -H "Authorization: token $GH_TOKEN" \
+              -X PATCH \
+              -d '{"state":"closed"}' \
+              "https://api.github.com/repos/$REPO/issues/$ISSUE_NUM"
+          fi
+
+          echo -n "PUT /actions/workflows/:id/disable (actions:write): "
+          WID=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq '.workflows[0].id')
+          DISABLE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X PUT \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WID/disable")
+          echo "$DISABLE_STATUS"
+          if [ "$DISABLE_STATUS" = "204" ]; then
+            echo "  Re-enabling workflow..."
+            curl -s -o /dev/null -w "  PUT /enable: %{http_code}\n" \
+              -H "Authorization: token $GH_TOKEN" \
+              -X PUT \
+              "https://api.github.com/repos/$REPO/actions/workflows/$WID/enable"
+          fi
+
+          echo -n "POST /git/refs (contents:write — create temp ref): "
+          HEAD_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/ref/heads/main" \
+            | jq -r '.object.sha')
+          REF_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X POST \
+            -d "{\"ref\":\"refs/heads/bot-token-test-probe\",\"sha\":\"$HEAD_SHA\"}" \
+            "https://api.github.com/repos/$REPO/git/refs")
+          echo "$REF_STATUS"
+          if [ "$REF_STATUS" = "201" ]; then
+            echo "  Cleaning up temp ref..."
+            curl -s -o /dev/null -w "  DELETE ref: %{http_code}\n" \
+              -H "Authorization: token $GH_TOKEN" \
+              -X DELETE \
+              "https://api.github.com/repos/$REPO/git/refs/heads/bot-token-test-probe"
+          fi
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "=== Summary ==="
+          echo "actor:  ${{ github.actor }}"
+          echo "event:  ${{ github.event_name }}"
+          echo ""
+          echo "If actor is a bot and all write ops returned 2xx,"
+          echo "then GITHUB_TOKEN permissions are NOT restricted by"
+          echo "the actor being a bot — they follow repo defaults."
+
+  explicit-permissions:
+    name: "Explicit permissions block"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Actor info
+        run: |
+          echo "=== Actor ==="
+          echo "actor:            ${{ github.actor }}"
+          echo "triggering_actor: ${{ github.triggering_actor }}"
+          echo "event:            ${{ github.event_name }}"
+
+      - name: Test read operations (should all succeed)
+        run: |
+          echo "--- Read operations (should succeed) ---"
+          echo -n "GET /contents (contents:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/.github/workflows"
+          echo ""
+
+          echo -n "GET /actions/workflows (actions:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows"
+          echo ""
+
+      - name: Test write operations (should all fail with 403)
+        run: |
+          echo "--- Write operations (should fail — explicit read-only block) ---"
+          echo -n "POST /issues (needs issues:write — we have read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X POST \
+            -d '{"title":"should-fail"}' \
+            "https://api.github.com/repos/$REPO/issues"
+          echo ""
+
+          echo -n "PUT /actions/workflows/:id/disable (needs actions:write — we have read): "
+          WID=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq '.workflows[0].id')
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X PUT \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WID/disable"
+          echo ""
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "=== Summary ==="
+          echo "actor:  ${{ github.actor }}"
+          echo "event:  ${{ github.event_name }}"
+          echo ""
+          echo "If actor is a bot and write ops returned 403,"
+          echo "then the explicit permissions block restricts the token"
+          echo "even when the actor is a bot — same as for human actors."
