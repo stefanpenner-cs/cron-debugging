@@ -17,7 +17,9 @@ GitHub's docs say the actor is "the last person who modified the cron syntax in 
 
 ### 1. Actor tracks cron SYNTAX changes, not file changes
 
-**Claim:** Modifying a workflow file (comments, steps, env vars) without touching the `cron:` expression does NOT change the schedule actor.
+**Claim:** Modifying a workflow file (comments, steps, env vars) without touching the `cron:` expression does NOT change the schedule actor. Modifying the actual cron expression DOES change the actor — and bots can become actors.
+
+#### Part A: Non-syntax changes do NOT update the actor
 
 **Evidence:** We had a GitHub App (`cron-actor-probe[bot]`) make 5+ commits to `cron-basic.yml`, including being the last pusher to `main`. The bot modified only comments and metadata — never the `cron:` line. Every schedule run still showed `actor: stefanpenner`.
 
@@ -46,18 +48,47 @@ Cron: Ownership Attribution  | actor: stefanpenner | sha: 8903c7b | 2026-05-01T2
 
 The `head_sha` is `8903c7b` — the bot's commit. The bot was the last author, last committer, and last pusher. But the actor is `stefanpenner` because `stefanpenner` was the last to write the `cron:` expression.
 
-**What this rules out:**
+#### Part B: Syntax changes DO update the actor (confirmed with bot)
+
+**Evidence:** The bot pushed a commit directly to `main` that changed the actual cron expression from `*/5 * * * *` to `*/7 * * * *` ([commit `132086c`](https://github.com/stefanpenner-cs/cron-debugging/commit/132086c)). The next schedule run showed `actor: cron-actor-probe[bot]` — the actor changed from `stefanpenner` to the bot.
+
+```sh
+# Bot's commit changing the cron expression:
+gh api repos/stefanpenner-cs/cron-debugging/commits/132086c \
+  --jq '{sha: .sha[:7], author: .commit.author.name, message: .commit.message | split("\n")[0]}'
+```
+```json
+{ "sha": "132086c", "author": "cron-actor-probe[bot]", "message": "test: bot changes cron syntax from \"*/5 * * * *\" to \"*/7 * * * *\"" }
+```
+
+```sh
+# Schedule run AFTER the bot changed cron syntax — actor is now the bot:
+gh api "repos/stefanpenner-cs/cron-debugging/actions/workflows/cron-basic.yml/runs?event=schedule&per_page=5" \
+  --jq '.workflow_runs[] | "\(.actor.login) (\(.actor.type)) | sha: \(.head_sha[:7]) | \(.created_at)"'
+```
+```
+cron-actor-probe[bot] (Bot) | sha: 1a33249 | 2026-05-01T22:42:43Z
+stefanpenner (User)         | sha: 8903c7b | 2026-05-01T22:10:56Z
+stefanpenner (User)         | sha: 8903c7b | 2026-05-01T21:48:56Z
+```
+
+The actor flipped from `stefanpenner` to `cron-actor-probe[bot]` at exactly the boundary where the cron expression changed. Note that `head_sha: 1a33249` is a later commit by `stefanpenner` — but the actor is still the bot, because the bot was the last to modify the cron expression.
+
+**What this rules out and confirms:**
 
 | Hypothesis | Prediction | Actual | Verdict |
 |------------|-----------|--------|---------|
-| Actor = last **pusher** to default branch | `cron-actor-probe[bot]` | `stefanpenner` | **RULED OUT** |
-| Actor = last **commit author** on workflow file | `cron-actor-probe[bot]` | `stefanpenner` | **RULED OUT** |
-| Actor = last **commit committer** on workflow file | `GitHub` (noreply) | `stefanpenner` | **RULED OUT** |
-| Actor = last person to modify **cron syntax** | `stefanpenner` | `stefanpenner` | **CONSISTENT** |
+| Actor = last **pusher** to default branch | `cron-actor-probe[bot]` | `stefanpenner` | **RULED OUT** (Part A) |
+| Actor = last **commit author** on workflow file | `cron-actor-probe[bot]` | `stefanpenner` | **RULED OUT** (Part A) |
+| Actor = last **commit committer** on workflow file | `GitHub` (noreply) | `stefanpenner` | **RULED OUT** (Part A) |
+| Actor = last person to modify **cron syntax** | `stefanpenner` | `stefanpenner` | **CONSISTENT** (Part A) |
+| Syntax change updates actor | `cron-actor-probe[bot]` | `cron-actor-probe[bot]` | **CONFIRMED** (Part B) |
+| Bots can become cron actors | `cron-actor-probe[bot]` | `cron-actor-probe[bot]` | **CONFIRMED** (Part B) |
 
-[Bot commit](https://github.com/stefanpenner-cs/cron-debugging/commit/9a74d99) |
-[Schedule run 25233183365](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25233183365) |
-[Ownership attribution run log](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25233183365)
+[Bot comment-only commit](https://github.com/stefanpenner-cs/cron-debugging/commit/9a74d99) |
+[Bot cron-syntax commit `132086c`](https://github.com/stefanpenner-cs/cron-debugging/commit/132086c) |
+[Schedule run with bot actor (25236316750)](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236316750) |
+[Previous run with human actor (25235357865)](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25235357865)
 
 ### 2. Schedule event payload structure
 
@@ -153,7 +184,7 @@ gh api repos/stefanpenner-cs/cron-debugging/commits/9a74d99 \
 { "author": "cron-actor-probe[bot]", "committer": "GitHub", "pushed_by": "cron-actor-probe[bot]" }
 ```
 
-The cron actor ignores all three. It tracks a **fourth** concept: who last modified the cron syntax.
+The cron actor ignores all three when the cron syntax is unchanged. When the cron syntax IS changed, it tracks who pushed the syntax change — for direct pushes, this is the push event actor. For PR merges, whether it follows the commit author or push event actor (the merger) is still under test.
 
 ### 5. GITHUB_TOKEN permissions respect the `permissions:` block
 
@@ -280,7 +311,7 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415 \
 >
 > — [Events that trigger workflows: schedule](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule)
 
-Our tests confirm this. The bot modified `cron-basic.yml` 5+ times (comments, timestamps) and was the last pusher — but the actor remained `stefanpenner` because the `cron:` line was untouched.
+Our tests confirm this in both directions. The bot modified `cron-basic.yml` 5+ times (comments, timestamps) without changing the `cron:` line — actor remained `stefanpenner`. Then the bot changed the actual cron expression (`*/5` → `*/7`) — actor immediately changed to `cron-actor-probe[bot]` ([run 25236316750](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236316750)).
 
 ### Correct: Reactivation updates the actor
 
@@ -298,11 +329,21 @@ The docs use "commit" loosely. Our PR tests show that for merged PRs:
 - **merge commit**: commit author = whoever clicked merge
 - **In both cases**: the cron actor didn't change because the cron syntax wasn't modified
 
-The docs don't clarify whether "commit" means the git author, the git committer, the push event actor, or the PR merger. Based on our tests, none of these matter — only the **cron syntax diff** matters.
+The docs don't clarify whether "commit" means the git author, the git committer, the push event actor, or the PR merger. For direct pushes, we confirmed it's the push event actor (the bot pushed and became the actor). For PR merges where the cron syntax changes, whether it's the commit author or the merger is still under test (see [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5)).
 
-### Silent: Bot/app accounts as cron actors
+### Confirmed (undocumented): Bot/app accounts CAN be cron actors
 
-The docs never mention whether a GitHub App or bot account can become a cron schedule actor. Our bot was the last to push, author, and commit — but the cron syntax was unchanged, so we can't confirm whether a bot *can* become the actor if it modifies the cron expression.
+The docs never mention whether a GitHub App or bot account can become a cron schedule actor. **We confirmed they can.** When `cron-actor-probe[bot]` changed the cron expression from `*/5 * * * *` to `*/7 * * * *` via direct push to `main`, the next schedule run showed `actor: cron-actor-probe[bot]` with `actor.type: Bot`.
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25236316750 \
+  --jq '{actor: .actor.login, actor_type: .actor.type, triggering_actor: .triggering_actor.login}'
+```
+```json
+{ "actor": "cron-actor-probe[bot]", "actor_type": "Bot", "triggering_actor": "cron-actor-probe[bot]" }
+```
+
+This has security implications: a compromised GitHub App with `contents:write` can silently become the cron actor by modifying a cron expression, potentially inheriting broader permissions than the app itself has.
 
 ### Important: 60-day auto-disable only applies to PUBLIC repositories
 
@@ -350,8 +391,9 @@ Repository
   │     │
   │     ├── schedule_entries[]:          ← parsed from YAML on push
   │     │     ├── cron: "*/5 * * * *"   ← the expression
-  │     │     └── actor: User           ← last person to modify THIS expression
+  │     │     └── actor: User | Bot     ← last account to modify THIS expression
   │     │                                  (NOT in API — inferred from behavior)
+  │     │                                  Confirmed: bot accounts CAN be actors
   │     │
   │     │   Note: each expression fires as a separate run, but our tests
   │     │   show all expressions in one file share the same actor.
@@ -384,15 +426,15 @@ This means GitHub maintains a **shadow state** for each cron entry that's separa
 
 ## What's Still Unknown
 
-- [ ] **Can a bot become the cron actor?** — Our bot never changed the actual cron expression. Test needed: bot modifies the `cron:` line itself. If the actor changes to the bot, it confirms the docs' "cron syntax" claim applies to app accounts too.
+- [x] **Can a bot become the cron actor?** — **YES.** Bot changed cron expression via direct push to `main`, actor flipped to `cron-actor-probe[bot]`. See [Finding #1, Part B](#1-actor-tracks-cron-syntax-changes-not-file-changes) and [run 25236316750](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236316750).
+- [x] **Bot modifies cron syntax** — **Confirmed.** Bot changed `*/5 * * * *` → `*/7 * * * *` in [commit `132086c`](https://github.com/stefanpenner-cs/cron-debugging/commit/132086c). Actor changed from `stefanpenner` to `cron-actor-probe[bot]`.
+- [ ] **Author vs merger for cron syntax changes** — When bot authors a cron change but user merges the PR (or vice versa), who becomes actor? Test A ([PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5): bot authored, user merged) created `cron-actor-disambiguate.yml` — awaiting first schedule run. Test B (user authors, bot merges) not yet run.
 - [ ] **Is actor per-expression or per-file?** — Our multi-schedule test had the same person (stefanpenner) write both expressions. Need: two different users each write one expression in the same file.
 - [ ] **What exactly triggers the 60-day disable?** — Only applies to public repos. Does any API call count as "activity"? Or only pushes? And is it per-repo or per-workflow?
 - [ ] **Rebase merge attribution** — Does `rebase` merge behave like squash (preserves author) or merge-commit (uses merger)?
 - [ ] **What happens when the actor loses repo access?** — Do crons stop? Switch to another actor? Continue with degraded permissions?
 - [ ] **Reactivation actor update** — Does re-enabling a disabled workflow with a cron syntax change actually update the actor as docs claim?
 - [ ] **Default branch change as actor hijack** — Docs say changing the default branch changes the actor for all cron workflows. Not yet tested.
-- [ ] **Bot modifies cron syntax** — Definitive test: have the bot change the actual `cron:` expression (not just comments). If the actor flips to the bot, it confirms the mechanism end-to-end.
-- [ ] **Author vs merger for cron syntax changes** — When bot authors a cron change but user merges the PR (or vice versa), who becomes actor? Is it the commit author (who wrote the syntax) or the push event actor (who merged)? Test A and B in `actor-disambiguate-test.js` — Test A in progress (PR #5).
 - [ ] **Merge queue actor attribution** — With merge queue enabled, the push event actor is `github-merge-queue[bot]`, not the PR author or the person who queued. If cron actor tracks push event actor, merge queue could set it to a system bot. Needs merge queue enabled to test.
 - [ ] **Web UI direct commit to cron syntax** — Editing a workflow file's cron expression via GitHub's web editor and committing straight to main. Author = user, committer = GitHub, push actor = user. Confirms baseline behavior without PR indirection.
 
@@ -436,6 +478,23 @@ node multi-cron-attribution-test.js setup   # bot edits multi-schedule file
 node multi-cron-attribution-test.js check   # compare actors across expressions
 ```
 
+### Test bot cron syntax change (actor transfer)
+
+```sh
+node cron-syntax-change-test.js setup    # bot changes cron expression (*/5 ↔ */7)
+node cron-syntax-change-test.js poll     # wait + auto-check (up to 20 min)
+node cron-syntax-change-test.js check    # check actor on post-change runs
+node cron-syntax-change-test.js restore  # human restores cron to */5
+```
+
+### Test author vs merger disambiguation
+
+```sh
+node actor-disambiguate-test.js testA    # bot authors cron change, user merges
+node actor-disambiguate-test.js testB    # user authors cron change, bot merges
+node actor-disambiguate-test.js check    # check schedule run actors
+```
+
 ### Check schedule event payload
 
 ```sh
@@ -459,7 +518,8 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25233237231/jobs \
 
 | File | Schedule | Purpose |
 |------|----------|---------|
-| [`cron-basic.yml`](.github/workflows/cron-basic.yml) | `*/5 * * * *` | Dumps full `github` context every 5 min |
+| [`cron-actor-disambiguate.yml`](.github/workflows/cron-actor-disambiguate.yml) | `*/6 * * * *` | Tests author-vs-merger for cron actor attribution |
+| [`cron-basic.yml`](.github/workflows/cron-basic.yml) | `*/7 * * * *` | Dumps full `github` context (currently bot-owned actor) |
 | [`cron-multi-schedule.yml`](.github/workflows/cron-multi-schedule.yml) | `*/10`, `*/15` | Tests which expression fired via `github.event.schedule` |
 | [`cron-ownership-test.yml`](.github/workflows/cron-ownership-test.yml) | `*/5 * * * *` | Checks git log for last modifier, queries run API for actor |
 | [`cron-token-permissions.yml`](.github/workflows/cron-token-permissions.yml) | `*/10 * * * *` | Explicit `permissions:` block, tests that restrictions apply |
@@ -477,6 +537,8 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25233237231/jobs \
 | [`bot-commit.js`](bot-commit.js) | Commits to workflow file as app bot |
 | [`pr-attribution-test.js`](pr-attribution-test.js) | Opens/merges PRs as bot/user in all permutations |
 | [`multi-cron-attribution-test.js`](multi-cron-attribution-test.js) | Tests multi-cron same-file actor attribution |
+| [`cron-syntax-change-test.js`](cron-syntax-change-test.js) | Bot changes actual cron expression, verifies actor changes |
+| [`actor-disambiguate-test.js`](actor-disambiguate-test.js) | Tests author-vs-merger for cron actor (PR-based syntax changes) |
 
 All scripts use `gh auth token` by default; override with `GH_TOKEN` env var.
 
@@ -496,3 +558,11 @@ Every schedule run observed, ordered chronologically:
 | 25233331699 | Multi-Schedule | `stefanpenner` | `8903c7b` | 2026-05-01T21:10:48Z |
 
 Note: Runs 6-8 have `head_sha: 8903c7b` — the bot's commit. The bot was the last author, committer, AND pusher for this SHA. Yet all three show `actor: stefanpenner`. This is the strongest evidence that actor resolution is independent of push/commit identity.
+
+### After bot changed cron syntax (`*/5` → `*/7` in commit `132086c`)
+
+| Run ID | Workflow | Actor | Actor Type | SHA | Created |
+|--------|----------|-------|------------|-----|---------|
+| 25236316750 | Basic Every 5 Min | `cron-actor-probe[bot]` | `Bot` | `1a33249` | 2026-05-01T22:42:43Z |
+
+**This is the definitive evidence.** The actor changed from `stefanpenner` (User) to `cron-actor-probe[bot]` (Bot) at the exact boundary where the cron expression was modified. The `head_sha` `1a33249` is a subsequent commit by `stefanpenner` — but the actor remains the bot, because the bot was the last to touch the `cron:` line.
