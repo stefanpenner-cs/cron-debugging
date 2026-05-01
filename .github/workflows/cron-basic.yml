@@ -47,3 +47,5 @@ jobs:
         run: echo "$GITHUB_CONTEXT" | jq .
 
 # bot-probe-timestamp: 2026-05-01T20:51:06.042Z
+
+# pr-attribution-test: bot-opens-user-merges (squash) at 2026-05-01T20:55:46.771Z
