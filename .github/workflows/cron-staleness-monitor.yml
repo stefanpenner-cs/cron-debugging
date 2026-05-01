@@ -1,0 +1,68 @@
+name: "Cron: Staleness Monitor"
+
+on:
+  schedule:
+    # Runs hourly — checks whether other cron workflows have fired recently
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check-staleness:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: List all scheduled workflows and their last run time
+        run: |
+          echo "============================================"
+          echo "  CRON STALENESS MONITOR"
+          echo "============================================"
+          echo ""
+          echo "Goal: detect cron jobs that silently stopped."
+          echo "There is no event for 'cron did not fire' —"
+          echo "you must poll and compare against expected cadence."
+          echo ""
+
+          REPO="${{ github.repository }}"
+
+          echo "=== All workflows in this repo ==="
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq -r '.workflows[] | "\(.id)\t\(.state)\t\(.name)"'
+          echo ""
+
+          echo "=== Last schedule-triggered run per workflow ==="
+          WORKFLOW_IDS=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq -r '.workflows[].id')
+
+          for WID in $WORKFLOW_IDS; do
+            LAST_RUN=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$WID/runs?event=schedule&per_page=1" \
+              | jq -r '
+                if (.workflow_runs | length) > 0 then
+                  .workflow_runs[0] | "\(.name) | last_run: \(.created_at) | status: \(.status) | conclusion: \(.conclusion)"
+                else
+                  "workflow \($WID) | NO schedule runs found"
+                end
+              ' 2>/dev/null || echo "workflow $WID | error querying")
+            echo "  $LAST_RUN"
+          done
+
+      - name: Check for auto-disabled workflows
+        run: |
+          echo "=== Disabled workflows (potential 60-day inactivity) ==="
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows" \
+            | jq -r '.workflows[] | select(.state == "disabled_manually" or .state == "disabled_inactivity") | "  \(.name): \(.state)"'
+          echo ""
+          echo "States: active, disabled_manually, disabled_inactivity"
+          echo "disabled_inactivity = GitHub auto-disabled after 60 days of no repo activity"
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

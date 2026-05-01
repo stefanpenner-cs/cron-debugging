@@ -1,0 +1,39 @@
+name: "Cron: Multi-Schedule"
+
+on:
+  schedule:
+    # Two different schedules — test which one fired via github.event.schedule
+    - cron: "*/10 * * * *"
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  which-schedule:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identify which cron expression fired
+        run: |
+          echo "=== Which schedule triggered this run? ==="
+          echo "github.event.schedule = '${{ github.event.schedule }}'"
+          echo ""
+          echo "If workflow_dispatch, this will be empty."
+          echo "If schedule, it will be the exact cron expression that matched."
+
+      - name: Conditional logic per schedule
+        run: |
+          SCHEDULE="${{ github.event.schedule }}"
+          if [ "$SCHEDULE" = "*/10 * * * *" ]; then
+            echo "Triggered by the 10-minute schedule"
+          elif [ "$SCHEDULE" = "*/15 * * * *" ]; then
+            echo "Triggered by the 15-minute schedule"
+          else
+            echo "Triggered manually or unknown schedule: '$SCHEDULE'"
+          fi
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

@@ -1,0 +1,97 @@
+name: "Cron: Control via API"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - list-all
+          - show-schedules
+          - check-permissions
+      target_workflow:
+        description: "Workflow filename (e.g. cron-basic.yml) — for show-schedules"
+        required: false
+        type: string
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Action: list-all"
+        if: inputs.action == 'list-all'
+        run: |
+          echo "=== All workflows and their state ==="
+          echo ""
+          echo "Note: GITHUB_TOKEN can list and view workflows but"
+          echo "CANNOT enable/disable them. You need a PAT with"
+          echo "actions:write scope, or use the UI."
+          echo ""
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq '.workflows[] | {id, name, state, path, created_at, updated_at}'
+
+      - name: "Action: show-schedules"
+        if: inputs.action == 'show-schedules'
+        run: |
+          echo "=== Cron schedules defined in workflow files ==="
+          echo ""
+          echo "Parsing schedule triggers from all workflow files:"
+          echo ""
+          for f in .github/workflows/*.yml; do
+            SCHEDULES=$(grep -A1 'schedule:' "$f" | grep 'cron:' | sed 's/.*cron: *"\(.*\)"/\1/' || true)
+            if [ -n "$SCHEDULES" ]; then
+              echo "$(basename $f):"
+              echo "$SCHEDULES" | while read -r line; do
+                echo "  - $line"
+              done
+            fi
+          done
+
+      - name: "Action: check-permissions"
+        if: inputs.action == 'check-permissions'
+        run: |
+          echo "=== GITHUB_TOKEN permission check ==="
+          echo ""
+          echo "Cron jobs run with the permissions of github.actor"
+          echo "(the last person to commit to the workflow file)."
+          echo ""
+          echo "actor: ${{ github.actor }}"
+          echo ""
+
+          echo "--- Can we read workflows? ---"
+          curl -s -o /dev/null -w "HTTP %{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows"
+          echo ""
+
+          echo "--- Can we read secrets? (should be 403) ---"
+          curl -s -o /dev/null -w "HTTP %{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/secrets"
+          echo ""
+
+          echo "--- Can we create issues? ---"
+          curl -s -o /dev/null -w "HTTP %{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues" \
+            -X POST -d '{"title":"permission-test","body":"delete me"}' 2>/dev/null || echo "(skipped — would create a real issue)"
+          echo ""
+          echo "Key insight: if the actor loses write access to the repo,"
+          echo "the cron's GITHUB_TOKEN is downgraded. The cron still runs,"
+          echo "but API calls that need write access will start failing silently."
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

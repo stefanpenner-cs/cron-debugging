@@ -1,0 +1,104 @@
+name: "Cron: Health Check (Diagnostic)"
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Step 1: Are all workflows enabled?"
+        run: |
+          echo "============================================"
+          echo "  CRON HEALTH CHECK"
+          echo "============================================"
+          echo ""
+          echo "Run this when you suspect a cron has stopped."
+          echo ""
+          echo "--- Workflow states ---"
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq -r '.workflows[] | "\(.state)\t\(.name)\t\(.path)"'
+
+      - name: "Step 2: YAML validity"
+        run: |
+          echo "--- YAML parse check ---"
+          echo "A YAML error means GitHub silently ignores the workflow."
+          echo ""
+          for f in .github/workflows/*.yml; do
+            if python3 -c "import yaml; yaml.safe_load(open('$f'))" 2>/dev/null; then
+              echo "OK:    $(basename $f)"
+            else
+              echo "ERROR: $(basename $f) — invalid YAML!"
+            fi
+          done
+
+      - name: "Step 3: Cron expression validity"
+        run: |
+          echo "--- Cron expression check ---"
+          echo "Invalid cron expressions are silently ignored."
+          echo ""
+          for f in .github/workflows/*.yml; do
+            CRONS=$(grep 'cron:' "$f" | sed 's/.*cron: *"\(.*\)"/\1/' || true)
+            if [ -n "$CRONS" ]; then
+              echo "$(basename $f):"
+              echo "$CRONS" | while read -r expr; do
+                FIELDS=$(echo "$expr" | wc -w | tr -d ' ')
+                if [ "$FIELDS" -eq 5 ]; then
+                  echo "  OK ($FIELDS fields): $expr"
+                else
+                  echo "  ERROR ($FIELDS fields, expected 5): $expr"
+                fi
+              done
+            fi
+          done
+
+      - name: "Step 4: Who is the current actor for each workflow?"
+        run: |
+          echo "--- Last committer to each workflow file (= cron actor) ---"
+          echo ""
+          for f in .github/workflows/*.yml; do
+            AUTHOR=$(git log --format="%an <%ae>" -1 -- "$f" 2>/dev/null || echo "unknown")
+            echo "$(basename $f): $AUTHOR"
+          done
+
+      - name: "Step 5: Recent run history"
+        run: |
+          echo "--- Last 3 scheduled runs per workflow ---"
+          echo ""
+          WORKFLOW_IDS=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq -r '.workflows[].id')
+
+          for WID in $WORKFLOW_IDS; do
+            echo "--- workflow $WID ---"
+            curl -s -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$WID/runs?event=schedule&per_page=3" \
+              | jq -r '.workflow_runs[] | "  \(.created_at) \(.conclusion) actor=\(.actor.login)"' 2>/dev/null || echo "  (no runs)"
+            echo ""
+          done
+
+      - name: "Step 6: 60-day inactivity risk"
+        run: |
+          echo "--- Last repo activity ---"
+          LAST_PUSH=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO" \
+            | jq -r '.pushed_at')
+          echo "Last push: $LAST_PUSH"
+          echo ""
+          echo "If no push for 60 days, GitHub auto-disables all scheduled workflows."
+          echo "Re-enable via: Actions tab → workflow → Enable workflow"
+          echo "Or keep-alive: a bot commit or workflow_dispatch run resets the clock."
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

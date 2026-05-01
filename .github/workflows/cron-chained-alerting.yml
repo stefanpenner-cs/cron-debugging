@@ -1,0 +1,51 @@
+name: "Cron: Chained Alerting (workflow_run)"
+
+on:
+  workflow_run:
+    workflows:
+      - "Cron: Basic Every 5 Min"
+      - "Cron: Ownership Attribution"
+    types:
+      - completed
+
+jobs:
+  react-to-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect the triggering workflow run
+        run: |
+          echo "============================================"
+          echo "  CHAINED ALERTING VIA workflow_run"
+          echo "============================================"
+          echo ""
+          echo "This workflow fires AFTER a cron workflow completes."
+          echo "Use this pattern to build alerting on cron failures"
+          echo "without modifying the cron workflow itself."
+          echo ""
+          echo "--- Triggering workflow ---"
+          echo "name:       ${{ github.event.workflow_run.name }}"
+          echo "conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "status:     ${{ github.event.workflow_run.status }}"
+          echo "event:      ${{ github.event.workflow_run.event }}"
+          echo "actor:      ${{ github.event.workflow_run.actor.login }}"
+          echo "run_id:     ${{ github.event.workflow_run.id }}"
+          echo "url:        ${{ github.event.workflow_run.html_url }}"
+          echo "created_at: ${{ github.event.workflow_run.created_at }}"
+
+      - name: Alert on failure
+        if: github.event.workflow_run.conclusion == 'failure'
+        run: |
+          echo "ALERT: Cron workflow '${{ github.event.workflow_run.name }}' failed!"
+          echo "Run URL: ${{ github.event.workflow_run.html_url }}"
+          echo ""
+          echo "In production, you'd send a Slack/PagerDuty/email alert here."
+          echo "This is the only reliable way to detect cron failures —"
+          echo "GitHub does not notify on scheduled workflow failures by default."
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

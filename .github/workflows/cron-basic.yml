@@ -1,0 +1,47 @@
+name: "Cron: Basic Every 5 Min"
+
+on:
+  schedule:
+    # Runs every 5 minutes (shortest practical interval for testing)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  dump-event:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dump trigger info
+        run: |
+          echo "=== Event Name ==="
+          echo "${{ github.event_name }}"
+
+          echo "=== Actor (who triggered) ==="
+          echo "${{ github.actor }}"
+
+          echo "=== Triggering Actor ==="
+          echo "${{ github.triggering_actor }}"
+
+          echo "=== Repository Owner ==="
+          echo "${{ github.repository_owner }}"
+
+          echo "=== Ref / SHA ==="
+          echo "ref:    ${{ github.ref }}"
+          echo "sha:    ${{ github.sha }}"
+
+          echo "=== Event Schedule ==="
+          echo "${{ github.event.schedule }}"
+
+          echo "=== Workflow ==="
+          echo "${{ github.workflow }}"
+          echo "workflow_ref: ${{ github.workflow_ref }}"
+          echo "workflow_sha: ${{ github.workflow_sha }}"
+
+      - name: Dump full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .
+
+      - name: Dump full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .

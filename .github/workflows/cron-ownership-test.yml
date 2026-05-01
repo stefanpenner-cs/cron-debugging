@@ -1,0 +1,83 @@
+name: "Cron: Ownership Attribution"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ownership-info:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Attribution and ownership details
+        run: |
+          echo "============================================"
+          echo "  CRON OWNERSHIP & ATTRIBUTION INVESTIGATION"
+          echo "============================================"
+          echo ""
+          echo "--- Who triggered this? ---"
+          echo "github.actor:            ${{ github.actor }}"
+          echo "github.triggering_actor: ${{ github.triggering_actor }}"
+          echo ""
+          echo "--- Sender from event payload ---"
+          echo "sender.login: ${{ github.event.sender.login }}"
+          echo "sender.id:    ${{ github.event.sender.id }}"
+          echo "sender.type:  ${{ github.event.sender.type }}"
+          echo ""
+          echo "--- Workflow file info ---"
+          echo "github.workflow:     ${{ github.workflow }}"
+          echo "github.workflow_ref: ${{ github.workflow_ref }}"
+          echo "github.workflow_sha: ${{ github.workflow_sha }}"
+          echo ""
+          echo "--- Branch / commit ---"
+          echo "github.ref:        ${{ github.ref }}"
+          echo "github.sha:        ${{ github.sha }}"
+          echo "github.head_ref:   ${{ github.head_ref }}"
+          echo "github.base_ref:   ${{ github.base_ref }}"
+          echo ""
+          echo "--- Repo / org ---"
+          echo "github.repository:       ${{ github.repository }}"
+          echo "github.repository_owner: ${{ github.repository_owner }}"
+
+      - name: Git blame the workflow file itself
+        run: |
+          echo "=== Who last modified this workflow file? ==="
+          git log --format="%H %an <%ae> %s" -5 -- .github/workflows/cron-ownership-test.yml || echo "(no history yet)"
+          echo ""
+          echo "=== Last committer to default branch ==="
+          git log --format="%H %an <%ae> %s" -1
+
+      - name: API query - workflow runs attribution
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== This workflow run via API ==="
+          curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | jq '{
+              id: .id,
+              name: .name,
+              event: .event,
+              status: .status,
+              conclusion: .conclusion,
+              actor_login: .actor.login,
+              actor_type: .actor.type,
+              triggering_actor_login: .triggering_actor.login,
+              triggering_actor_type: .triggering_actor.type,
+              head_branch: .head_branch,
+              head_sha: .head_sha,
+              workflow_id: .workflow_id,
+              run_started_at: .run_started_at,
+              created_at: .created_at,
+              updated_at: .updated_at
+            }'
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .

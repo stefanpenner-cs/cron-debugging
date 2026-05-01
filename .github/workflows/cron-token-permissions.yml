@@ -1,0 +1,102 @@
+name: "Cron: Token Permission Scope"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  permission-test:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Document permission model
+        run: |
+          echo "============================================"
+          echo "  CRON TOKEN PERMISSION INVESTIGATION"
+          echo "============================================"
+          echo ""
+          echo "Key facts about GITHUB_TOKEN in cron context:"
+          echo ""
+          echo "1. The token's identity = github.actor = last workflow file committer"
+          echo "2. Token permissions = min(workflow permissions block, actor's repo access)"
+          echo "3. If actor loses repo access → token may be downgraded or invalid"
+          echo "4. Org-level settings can restrict default token permissions"
+          echo "5. The 'permissions' key in the workflow file sets an upper bound"
+          echo ""
+          echo "actor for this run: ${{ github.actor }}"
+
+      - name: Test read operations
+        run: |
+          echo "--- Read operations (should succeed) ---"
+          echo -n "GET /repos (contents:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/.github/workflows"
+          echo ""
+
+          echo -n "GET /actions/workflows (actions:read): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows"
+          echo ""
+
+      - name: Test write operations
+        run: |
+          echo "--- Write operations ---"
+          echo -n "GET /issues (issues:write): "
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues"
+          echo ""
+
+          echo -n "PUT /actions/workflows/:id/disable (needs actions:write — we only have read): "
+          WID=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/workflows" \
+            | jq '.workflows[0].id')
+          curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GH_TOKEN" \
+            -X PUT \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WID/disable"
+          echo ""
+          echo ""
+          echo "Expected: disable returns 403 because we only declared actions:read"
+
+      - name: Document ownership transfer risks
+        run: |
+          echo "============================================"
+          echo "  OWNERSHIP TRANSFER RISKS"
+          echo "============================================"
+          echo ""
+          echo "Scenario: Alice creates cron workflow, Bob later edits it."
+          echo ""
+          echo "What happens:"
+          echo "  - github.actor changes from Alice to Bob"
+          echo "  - GITHUB_TOKEN now uses Bob's permissions"
+          echo "  - If Bob has fewer permissions → cron silently loses capabilities"
+          echo "  - If Bob leaves the org → cron may break entirely"
+          echo ""
+          echo "Detection:"
+          echo "  - No notification when actor changes"
+          echo "  - Must poll: compare git blame on workflow file vs expected actor"
+          echo "  - API: check .actor.login on recent schedule runs"
+          echo ""
+          echo "Prevention:"
+          echo "  - Use a bot/service account as the committer for workflow files"
+          echo "  - CODEOWNERS on .github/workflows/ to gate changes"
+          echo "  - Explicit 'permissions' block to document expected scope"
+
+      - name: Full github context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT" | jq .
+
+      - name: Full event payload
+        run: cat "$GITHUB_EVENT_PATH" | jq .
