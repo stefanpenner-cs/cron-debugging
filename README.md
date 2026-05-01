@@ -2,8 +2,6 @@
 
 How GitHub Actions internally represents and executes cron schedules. Every claim backed by an API probe or workflow run.
 
-All paths below are relative to `/repos/stefanpenner-cs/cron-debugging`. Full request/response details in [`api-endpoints.md`](api-endpoints.md).
-
 ## Findings
 
 ### Are cron schedules visible via the API?
@@ -210,99 +208,6 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672
 
 [Evidence](api-endpoints.md#get-a-single-workflow-run) | [Run in UI](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672)
 
-### How do you see queue wait time?
-
-Compare `created_at` vs `started_at` on the job. The gap is queue wait.
-
-```sh
-gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415
-```
-
-<details><summary>Response</summary>
-
-```json
-{
-  "id": 73988338415,
-  "run_id": 25231646672,
-  "workflow_name": "Cron: Chained Alerting (workflow_run)",
-  "head_branch": "main",
-  "run_url": "https://api.github.com/repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672",
-  "run_attempt": 1,
-  "node_id": "CR_kwDOSR7-S88AAAAROgxy7w",
-  "head_sha": "cafefe8b53d62300eec29114c3d28585ce357a67",
-  "url": "https://api.github.com/repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415",
-  "html_url": "https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672/job/73988338415",
-  "status": "completed",
-  "conclusion": "success",
-  "created_at": "2026-05-01T20:25:18Z",
-  "started_at": "2026-05-01T20:25:29Z",
-  "completed_at": "2026-05-01T20:25:34Z",
-  "name": "react-to-cron",
-  "steps": [
-    {
-      "name": "Set up job",
-      "status": "completed",
-      "conclusion": "success",
-      "number": 1,
-      "started_at": "2026-05-01T20:25:30Z",
-      "completed_at": "2026-05-01T20:25:30Z"
-    },
-    {
-      "name": "Inspect the triggering workflow run",
-      "status": "completed",
-      "conclusion": "success",
-      "number": 2,
-      "started_at": "2026-05-01T20:25:30Z",
-      "completed_at": "2026-05-01T20:25:31Z"
-    },
-    {
-      "name": "Alert on failure",
-      "status": "completed",
-      "conclusion": "skipped",
-      "number": 3,
-      "started_at": "2026-05-01T20:25:31Z",
-      "completed_at": "2026-05-01T20:25:31Z"
-    },
-    {
-      "name": "Full github context",
-      "status": "completed",
-      "conclusion": "success",
-      "number": 4,
-      "started_at": "2026-05-01T20:25:31Z",
-      "completed_at": "2026-05-01T20:25:31Z"
-    },
-    {
-      "name": "Full event payload",
-      "status": "completed",
-      "conclusion": "success",
-      "number": 5,
-      "started_at": "2026-05-01T20:25:31Z",
-      "completed_at": "2026-05-01T20:25:31Z"
-    },
-    {
-      "name": "Complete job",
-      "status": "completed",
-      "conclusion": "success",
-      "number": 6,
-      "started_at": "2026-05-01T20:25:31Z",
-      "completed_at": "2026-05-01T20:25:31Z"
-    }
-  ],
-  "check_run_url": "https://api.github.com/repos/stefanpenner-cs/cron-debugging/check-runs/73988338415",
-  "labels": [
-    "ubuntu-latest"
-  ],
-  "runner_id": 1000000136,
-  "runner_name": "GitHub Actions 1000000136",
-  "runner_group_id": 0,
-  "runner_group_name": "GitHub Actions"
-}
-```
-
-</details>
-
-11s queue wait. [Evidence](api-endpoints.md#get-a-single-job) | [Job in UI](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25231646672/job/73988338415)
-
 ### Does GitHub inject synthetic steps?
 
 **Yes.** 4 user-defined steps → 6 returned. GitHub adds `"Set up job"` (step 1) and `"Complete job"` (last). Steps gated on `if:` conditions show `conclusion: "skipped"`.
@@ -370,63 +275,6 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/73988338415 --jq '.step
 
 [Evidence](api-endpoints.md#get-a-single-job)
 
-### How do logs work?
-
-Zip download. 404 if the run isn't complete yet. Served from a different backend (`x-github-backend: Kubernetes`).
-
-```sh
-gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672/logs > logs.zip
-```
-```
-Content-Disposition: attachment; filename=logs_67114071363.zip
-Content-Type: application/zip
-```
-[Evidence](api-endpoints.md#download-workflow-run-logs)
-
-### How do you get billing/timing info?
-
-```sh
-gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25231646672/timing
-```
-
-<details><summary>Response</summary>
-
-```json
-{
-  "billable": {
-    "UBUNTU": {
-      "total_ms": 0,
-      "jobs": 1,
-      "job_runs": [
-        {
-          "job_id": 73988338415,
-          "duration_ms": 0
-        }
-      ]
-    }
-  },
-  "run_duration_ms": 18000
-}
-```
-
-</details>
-
-Billable can be 0 for short runs / free tier. [Evidence](api-endpoints.md#get-workflow-run-usagetiming)
-
-### Is `POST /dispatches` deprecated?
-
-**Yes.** Response headers confirm:
-
-```sh
-gh api -X POST repos/stefanpenner-cs/cron-debugging/actions/workflows/269650800/dispatches -f ref=main
-```
-```
-204 (empty body)
-deprecation: Tue, 10 Mar 2026 00:00:00 GMT
-sunset: Fri, 10 Mar 2028 00:00:00 GMT
-```
-No run ID returned — you must poll `/actions/runs` to find the new run. [Evidence](api-endpoints.md#create-workflow-dispatch-event)
-
 ### Does `workflow_run` chaining work?
 
 **Yes.** Basic workflow completed at ~20:25:15, chained alerting created at 20:25:17 (2s latency).
@@ -467,23 +315,6 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/permissions/workflow
 </details>
 
 [Permissions](api-endpoints.md#get-default-workflow-permissions) | [Token](api-endpoints.md#get-default-github_token-permissions)
-
-### How does pagination work?
-
-`Link` header with `rel="next"` / `rel="last"`. URLs use the numeric repo ID, not the slug.
-
-```sh
-gh api repos/stefanpenner-cs/cron-debugging/actions/runs?per_page=3 --include 2>&1 | grep -i link
-```
-```
-link: <https://api.github.com/repositories/1226767947/actions/runs?per_page=3&page=2>; rel="next", ...
-```
-[Evidence](api-endpoints.md#list-workflow-runs-for-repo)
-
-### Caching behavior?
-
-All GETs: `cache-control: private, max-age=60, s-maxage=60` + ETag + Vary.
-All writes (PUT/POST): no cache headers. [Evidence](api-endpoints.md)
 
 ## Not yet verified
 
