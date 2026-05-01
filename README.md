@@ -92,6 +92,33 @@ State transitions:
 | `cron-health-check.yml` | Manual dispatch: full diagnostic — YAML validity, actor audit, staleness, 60-day risk |
 | `cron-token-permissions.yml` | Tests GITHUB_TOKEN permission scoping under cron with explicit permissions block |
 
+## API Endpoints
+
+Run `npm run probe` (requires `GH_TOKEN` env var) to probe all relevant GitHub Actions API endpoints and generate [`api-endpoints.md`](api-endpoints.md) with full request/response documentation including headers.
+
+18 endpoints are covered:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/actions/workflows` | GET | List all workflows — `state` field reveals `active`/`disabled_manually`/`disabled_inactivity` |
+| `/actions/workflows/{id}` | GET | Single workflow by numeric ID |
+| `/actions/workflows/{filename}` | GET | Single workflow by filename (e.g. `cron-basic.yml`) |
+| `/actions/runs` | GET | All runs, filterable by `event`, `status`, `branch`, `actor` |
+| `/actions/runs?event=schedule` | GET | Cron-only runs — the key observability query |
+| `/actions/workflows/{id}/runs` | GET | Runs for a specific workflow |
+| `/actions/runs/{id}` | GET | Single run — actor, triggering_actor, conclusion, timing |
+| `/actions/runs/{id}/jobs` | GET | Jobs within a run, each with step-level status |
+| `/actions/jobs/{id}` | GET | Single job with step-level timing |
+| `/actions/runs/{id}/logs` | GET | Download job logs as zip (follows 302 redirect) |
+| `/actions/runs/{id}/attempts/{n}` | GET | Specific retry attempt of a run |
+| `/actions/runs/{id}/timing` | GET | Billable time breakdown by OS |
+| `/actions/workflows/{id}/dispatches` | POST | Manual trigger (our testing escape hatch) |
+| `/actions/workflows/{id}/disable` | PUT | Disable a workflow (needs `actions:write`) |
+| `/actions/workflows/{id}/enable` | PUT | Re-enable (recovery from 60-day auto-disable) |
+| `/actions/artifacts` | GET | Artifacts uploaded by workflow runs |
+| `/actions/permissions` | GET | Repo-level Actions enabled/allowed policy |
+| `/actions/permissions/workflow` | GET | Default GITHUB_TOKEN permission level |
+
 ## Known behaviors (from docs)
 
 1. **Schedule only runs on default branch.** The workflow file must exist on the default branch for the cron to be registered.

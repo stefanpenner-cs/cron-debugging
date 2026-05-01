@@ -1,0 +1,28 @@
+{
+  "name": "cron-debugging",
+  "version": "1.0.0",
+  "description": "Experiments to understand GitHub Actions `schedule` (cron) trigger behavior.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "probe": "node probe-endpoints.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stefanpenner-cs/cron-debugging.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/stefanpenner-cs/cron-debugging/issues"
+  },
+  "homepage": "https://github.com/stefanpenner-cs/cron-debugging#readme",
+  "devDependencies": {
+    "@octokit/auth-app": "^8.2.0",
+    "@octokit/rest": "^22.0.1",
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1"
+  }
+}
