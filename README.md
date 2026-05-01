@@ -392,6 +392,9 @@ This means GitHub maintains a **shadow state** for each cron entry that's separa
 - [ ] **Reactivation actor update** — Does re-enabling a disabled workflow with a cron syntax change actually update the actor as docs claim?
 - [ ] **Default branch change as actor hijack** — Docs say changing the default branch changes the actor for all cron workflows. Not yet tested.
 - [ ] **Bot modifies cron syntax** — Definitive test: have the bot change the actual `cron:` expression (not just comments). If the actor flips to the bot, it confirms the mechanism end-to-end.
+- [ ] **Author vs merger for cron syntax changes** — When bot authors a cron change but user merges the PR (or vice versa), who becomes actor? Is it the commit author (who wrote the syntax) or the push event actor (who merged)? Test A and B in `actor-disambiguate-test.js` — Test A in progress (PR #5).
+- [ ] **Merge queue actor attribution** — With merge queue enabled, the push event actor is `github-merge-queue[bot]`, not the PR author or the person who queued. If cron actor tracks push event actor, merge queue could set it to a system bot. Needs merge queue enabled to test.
+- [ ] **Web UI direct commit to cron syntax** — Editing a workflow file's cron expression via GitHub's web editor and committing straight to main. Author = user, committer = GitHub, push actor = user. Confirms baseline behavior without PR indirection.
 
 ## Reproduction
 
