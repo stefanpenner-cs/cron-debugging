@@ -3,7 +3,7 @@ name: "Cron: Basic Every 5 Min"
 on:
   schedule:
     # Runs every 5 minutes (shortest practical interval for testing)
-    - cron: "*/5 * * * *"
+    - cron: "*/7 * * * *"
   workflow_dispatch: {}
 
 jobs:
