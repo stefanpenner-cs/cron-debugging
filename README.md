@@ -239,8 +239,43 @@ The repo default is `write` for all permissions, but the workflow-level block ov
 
 Note: the GitHub docs have **no special carve-out for `schedule` events** regarding GITHUB_TOKEN. Unlike `pull_request` events from forks (which get read-only tokens), schedule events run on the default branch and receive the normal default permissions — unless overridden by a `permissions:` block.
 
+#### Bot actor gets identical GITHUB_TOKEN permissions
+
+**Claim:** When a bot is the cron actor, the `GITHUB_TOKEN` gets the same permissions as when a human is the actor — determined by repo defaults and the workflow's `permissions:` block, not by the actor's identity.
+
+**Evidence:** `cron-basic.yml` has no `permissions:` block and runs with `actor: cron-actor-probe[bot]`. The GITHUB_TOKEN log header from [run 25236985054](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236985054) shows full repo-default write permissions — identical to human-actor runs:
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25236985054/jobs \
+  --jq '.jobs[0].id' | xargs -I{} \
+  gh api repos/stefanpenner-cs/cron-debugging/actions/jobs/{}/logs 2>&1 \
+  | grep -A18 "GITHUB_TOKEN Permissions"
+```
+```
+GITHUB_TOKEN Permissions
+  Actions: write
+  Contents: write
+  Checks: write
+  Issues: write
+  PullRequests: write
+  Packages: write
+  ... (all write — identical to human-actor runs)
+```
+
+`cron-bot-token-test.yml` further tested write operations under schedule runs. The default-permissions job (no `permissions:` block) successfully created an issue (201), disabled/re-enabled a workflow (204), and created/deleted a git ref (201) — all write operations succeeded. The explicit-permissions job (`contents:read`, `actions:read`, `issues:read`) correctly blocked writes with 403.
+
+```
+Default permissions job:    POST /issues → 201, PUT /disable → 204, POST /refs → 201
+Explicit permissions job:   POST /issues → 403, PUT /disable → 403
+```
+
+**Conclusion:** The actor being a bot does NOT restrict `GITHUB_TOKEN`. A bot-actor schedule run with no `permissions:` block gets full repo-default write access. This is a security consideration: a GitHub App that becomes the cron actor by modifying the cron expression does not reduce the workflow's capabilities.
+
 [Token permissions workflow](.github/workflows/cron-token-permissions.yml) |
-[Run 25233237231](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25233237231)
+[Run 25233237231 (human actor)](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25233237231) |
+[Bot token test workflow](.github/workflows/cron-bot-token-test.yml) |
+[Run 25236985054 (bot actor, cron-basic)](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236985054) |
+[Run 25237485693 (bot-token-test)](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25237485693)
 
 ### 6. Cron schedules are invisible to the API
 
@@ -521,6 +556,14 @@ node actor-disambiguate-test.js testB    # user authors cron change, bot merges
 node actor-disambiguate-test.js check    # check schedule run actors
 ```
 
+### Test bot-actor GITHUB_TOKEN permissions
+
+```sh
+node bot-token-test.js setup   # bot changes cron expression (becomes actor)
+node bot-token-test.js poll    # wait for bot-actor schedule run
+node bot-token-test.js check   # inspect token permissions from run logs
+```
+
 ### Check schedule event payload
 
 ```sh
@@ -546,6 +589,7 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25233237231/jobs \
 |------|----------|---------|
 | [`cron-actor-disambiguate.yml`](.github/workflows/cron-actor-disambiguate.yml) | `*/6 * * * *` | Tests author-vs-merger for cron actor attribution |
 | [`cron-basic.yml`](.github/workflows/cron-basic.yml) | `*/7 * * * *` | Dumps full `github` context (currently bot-owned actor) |
+| [`cron-bot-token-test.yml`](.github/workflows/cron-bot-token-test.yml) | `*/8 * * * *` | Tests GITHUB_TOKEN permissions under bot actor (default + explicit) |
 | [`cron-multi-schedule.yml`](.github/workflows/cron-multi-schedule.yml) | `*/10`, `*/15` | Tests which expression fired via `github.event.schedule` |
 | [`cron-ownership-test.yml`](.github/workflows/cron-ownership-test.yml) | `*/5 * * * *` | Checks git log for last modifier, queries run API for actor |
 | [`cron-token-permissions.yml`](.github/workflows/cron-token-permissions.yml) | `*/10 * * * *` | Explicit `permissions:` block, tests that restrictions apply |
@@ -565,6 +609,7 @@ gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25233237231/jobs \
 | [`multi-cron-attribution-test.js`](multi-cron-attribution-test.js) | Tests multi-cron same-file actor attribution |
 | [`cron-syntax-change-test.js`](cron-syntax-change-test.js) | Bot changes actual cron expression, verifies actor changes |
 | [`actor-disambiguate-test.js`](actor-disambiguate-test.js) | Tests author-vs-merger for cron actor (PR-based syntax changes) |
+| [`bot-token-test.js`](bot-token-test.js) | Bot changes cron expression, checks GITHUB_TOKEN permissions |
 
 All scripts use `gh auth token` by default; override with `GH_TOKEN` env var.
 
