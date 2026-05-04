@@ -4,14 +4,14 @@ How GitHub internally resolves cron schedule ownership, actor attribution, and t
 
 ## TL;DR
 
-The cron schedule **actor** is the **push event actor** of the last commit that changed the `cron:` expression on the default branch. Not the commit author. Not the committer. The person (or bot) who pushed or merged it.
+The cron schedule **actor** is the **push event actor** of the last commit that changed the `cron:` expression on the default branch. Not the commit author. Not the committer. Whoever triggered the push event that delivered the change.
 
 - Editing a workflow file without touching the `cron:` line? Actor doesn't change.
 - Bot authors a cron change in a PR, human merges? Actor = the human.
 - Human authors a cron change in a PR, bot merges? Actor = the bot.
 - Bot pushes a cron change directly? Actor = the bot.
 
-GitHub's docs say "the user who last modified the cron syntax." This is misleading — it's really "the last account to **push or merge** a commit that changes the cron syntax to the default branch."
+GitHub's docs say "the user who last modified the cron syntax." This is misleading — it's really "the push event actor of the last commit that changes the cron syntax on the default branch."
 
 ## The Core Question
 
@@ -28,7 +28,7 @@ Notably, `GITHUB_TOKEN` permissions are **not** scoped to the actor — they fol
 
 ### 1. Actor = push event actor of the last cron syntax change
 
-The cron actor is determined by a single rule: **who pushed or merged the last commit that changed a `cron:` expression to the default branch.** Everything else — commit author, committer, PR opener — is irrelevant.
+The cron actor is determined by a single rule: **the push event actor of the last commit that changed a `cron:` expression on the default branch.** Everything else — commit author, committer, PR opener — is irrelevant.
 
 #### Non-syntax changes don't update the actor
 
@@ -145,7 +145,7 @@ Git commit
   ├── committer — who applied it ("GitHub" for PR merges) ← IGNORED for cron actor
   │
 Push event
-  └── actor — who pushed/merged to the ref               ← THIS determines cron actor
+  └── actor — who triggered the ref update               ← THIS determines cron actor
               ├── git push         → authenticated user
               ├── API commit       → the app/bot
               ├── PR merge by user → the user
@@ -171,7 +171,7 @@ Push event
 
 > "Notifications for scheduled workflows are sent to the user who last modified the cron syntax in the workflow file."
 
-True in spirit, but "modified" is ambiguous. It's not the person who authored the change — it's the person who **pushed or merged** it to the default branch. The docs should say: "the last account to push or merge a commit that changes the cron syntax."
+True in spirit, but "modified" is ambiguous. It's not the person who authored the change — it's whoever triggered the push event that delivered the change to the default branch.
 
 Evidence: [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) (bot authored, user merged → actor is user) and [PR #6](https://github.com/stefanpenner-cs/cron-debugging/pull/6) (user authored, bot merged → actor is bot).
 
@@ -185,11 +185,24 @@ Evidence: [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) (bot
 
 The docs say "public repository" — private repos are not subject to this rule.
 
-### Changing default branch changes the actor (documented but not tested)
+### Contradicted: Default branch swap does NOT hijack actors
 
 > "Certain repository events change the `actor` associated with the workflow. For example, a user who changes the default branch of the repository... becomes `actor` for those scheduled workflows."
 
-Anyone with admin access to change the default branch could hijack the actor for all cron workflows without touching any workflow files.
+**Tested and contradicted.** The bot used `repos.update` to change the default branch from `main` → `temp-default-branch-test` → back to `main`. The next schedule run of `cron-ownership-test.yml` still showed `actor: stefanpenner`.
+
+```sh
+# Run AFTER the bot swapped the default branch (back and forth):
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25327441147 \
+  --jq '{actor: .actor.login, actor_type: .actor.type, created_at: .created_at}'
+```
+```json
+{ "actor": "stefanpenner", "actor_type": "User", "created_at": "2026-05-04T15:20:44Z" }
+```
+
+The bot changed the default branch at ~14:45 UTC. The ownership-test ran at 15:20 UTC with `actor: stefanpenner` unchanged.
+
+**Caveat:** The swap was round-trip (changed and immediately reverted). A one-way permanent change might behave differently. This disproves the docs for the round-trip case but doesn't test a permanent switch.
 
 ### Account status matters, org membership doesn't
 
@@ -218,7 +231,8 @@ Repository
   │           (NOT affected by actor identity)
   │
   ├── Push Event (on every ref update)
-  │     └── actor: who pushed/merged     ← THIS determines cron actor
+  │     └── actor: who triggered the ref update on GitHub
+  │         ← THIS determines cron actor
   │
   └── Commit (git object)
         ├── author                       ← irrelevant to cron actor
@@ -233,7 +247,7 @@ GitHub maintains **shadow state** for each cron entry separate from the git hist
 - [ ] **Rebase merge commit identity** — Push event actor is always the merger (already proven). But does rebase merge preserve the original commit author like squash does? Matters for git-log auditing, not cron actor.
 - [ ] **What happens when the actor loses repo access?** — Do crons stop? Switch to another actor? Continue with degraded permissions?
 - [ ] **Reactivation actor update** — Does re-enabling a disabled workflow with a cron syntax change actually update the actor as docs claim?
-- [ ] **Default branch change as actor hijack** — Docs say changing the default branch changes the actor for all cron workflows. Not yet tested.
+- [x] **Default branch change as actor hijack** — Round-trip swap (main → temp → main) did NOT change the actor. Contradicts docs. Permanent switch untested. [Run 25327441147](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327441147)
 - [ ] **Merge queue actor attribution** — The push event actor would be `github-merge-queue[bot]`. If cron actor tracks push event actor, merge queue could silently set crons to a system bot.
 - [ ] **Web UI direct commit to cron syntax** — Confirms baseline: author = user, committer = GitHub, push actor = user.
 - [ ] **60-day inactivity definition** — What counts as "repository activity"? Only pushes? Any API call?
@@ -255,6 +269,7 @@ npm install
 | `node actor-disambiguate-test.js testB` | User authors cron change, bot merges |
 | `node bot-token-test.js setup` | Tests GITHUB_TOKEN under bot actor |
 | `node multi-cron-attribution-test.js setup` | Tests multi-cron same-file attribution |
+| `node remaining-tests.js setup-all` | Runs rebase, reactivation, default-branch, per-expression tests |
 
 All scripts use `gh auth token` by default; override with `GH_TOKEN` env var.
 
@@ -268,6 +283,10 @@ All scripts use `gh auth token` by default; override with `GH_TOKEN` env var.
 | [`cron-multi-schedule.yml`](.github/workflows/cron-multi-schedule.yml) | `*/10`, `*/15` | Multi-expression discrimination |
 | [`cron-ownership-test.yml`](.github/workflows/cron-ownership-test.yml) | `*/5` | Git log + run API actor comparison |
 | [`cron-token-permissions.yml`](.github/workflows/cron-token-permissions.yml) | `*/10` | Explicit `permissions:` block test |
+| [`cron-rebase-merge-test.yml`](.github/workflows/cron-rebase-merge-test.yml) | `*/6` | Rebase merge: bot authored, user merged |
+| [`cron-reactivation-test.yml`](.github/workflows/cron-reactivation-test.yml) | `*/6` | Disable → bot changes cron → re-enable |
+| [`cron-default-branch-test.yml`](.github/workflows/cron-default-branch-test.yml) | `*/5` | Default branch swap actor test |
+| [`cron-per-expression-test.yml`](.github/workflows/cron-per-expression-test.yml) | `*/10`, `*/11` | Per-expression vs per-file actor |
 | [`cron-staleness-monitor.yml`](.github/workflows/cron-staleness-monitor.yml) | hourly | Have other crons fired recently? |
 | [`cron-chained-alerting.yml`](.github/workflows/cron-chained-alerting.yml) | — | `workflow_run` failure alerting |
 | [`cron-control-api.yml`](.github/workflows/cron-control-api.yml) | — | Manual: list/parse/control workflows |
