@@ -19,7 +19,8 @@ When a `schedule` event fires, GitHub picks an **actor** — the account under w
 
 - **Notifications** — who gets failure emails
 - **Fork access** — whether the run can access fork secrets
-- **60-day inactivity** — if the actor is deprovisioned (EMU), crons stop
+- **60-day inactivity** — public repos disable crons after 60 days of no activity
+- **Account status** — if the actor is deleted or deprovisioned (EMU), crons stop
 
 Notably, `GITHUB_TOKEN` permissions are **not** scoped to the actor — they follow the repo defaults or the workflow's `permissions:` block regardless of who the actor is ([Finding #4](#4-github_token-permissions-are-independent-of-the-actor)).
 
@@ -94,17 +95,16 @@ The `schedule` event payload contains the exact cron expression that fired and h
 
 ```json
 {
-  "event_name": "schedule",
-  "event": {
-    "schedule": "*/5 * * * *",
-    "repository": { "..." }
-  }
+  "schedule": "*/5 * * * *",
+  "repository": { "..." }
 }
 ```
 
+The event name is available via `github.event_name` (= `"schedule"`), not in the payload itself.
+
 Each expression in a multi-cron workflow fires as a separate run. `github.event.schedule` contains the matching expression, enabling conditional logic:
 
-```yaml
+```sh
 if [ "${{ github.event.schedule }}" = "*/10 * * * *" ]; then
   echo "10-minute task"
 fi
@@ -230,7 +230,7 @@ GitHub maintains **shadow state** for each cron entry separate from the git hist
 ## What's Still Unknown
 
 - [ ] **Is actor per-expression or per-file?** — Our multi-schedule test had the same person write both expressions. Need: two different users each write one expression in the same file.
-- [ ] **Rebase merge attribution** — Does `rebase` merge behave like squash (preserves author) or merge-commit (uses merger) for the push event actor?
+- [ ] **Rebase merge commit identity** — Push event actor is always the merger (already proven). But does rebase merge preserve the original commit author like squash does? Matters for git-log auditing, not cron actor.
 - [ ] **What happens when the actor loses repo access?** — Do crons stop? Switch to another actor? Continue with degraded permissions?
 - [ ] **Reactivation actor update** — Does re-enabling a disabled workflow with a cron syntax change actually update the actor as docs claim?
 - [ ] **Default branch change as actor hijack** — Docs say changing the default branch changes the actor for all cron workflows. Not yet tested.
