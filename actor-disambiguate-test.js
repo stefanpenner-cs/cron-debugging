@@ -168,7 +168,7 @@ async function testB() {
     commitAuthor = commit.commit.author.name;
     console.log(`   Commit author: ${commitAuthor}`);
   } catch (err) {
-    if (err.status === 404 || err.status === 422) {
+    if (err.status === 403 || err.status === 404 || err.status === 422) {
       console.log(`   User API lacks workflow scope, using git push instead...`);
       execSync(`git fetch origin`, { stdio: "inherit" });
       execSync(`git checkout ${branchName}`, { stdio: "inherit" });
