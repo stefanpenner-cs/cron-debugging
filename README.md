@@ -4,14 +4,14 @@ How GitHub internally resolves cron schedule ownership, actor attribution, and t
 
 ## TL;DR
 
-The cron schedule **actor** is the **push event actor** of the last commit that changed the `cron:` expression on the default branch. Not the commit author. Not the committer. Whoever triggered the push event that delivered the change.
+The cron schedule **actor** depends on how the cron syntax change reached the default branch:
 
+- **Direct push / API commit** → the pusher/app
+- **Squash merge** → the person who merged the PR (push event actor)
+- **Rebase merge** → the original commit author (NOT the merger!)
 - Editing a workflow file without touching the `cron:` line? Actor doesn't change.
-- Bot authors a cron change in a PR, human merges? Actor = the human.
-- Human authors a cron change in a PR, bot merges? Actor = the bot.
-- Bot pushes a cron change directly? Actor = the bot.
 
-GitHub's docs say "the user who last modified the cron syntax." This is misleading — it's really "the push event actor of the last commit that changes the cron syntax on the default branch."
+GitHub's docs say "the user who last modified the cron syntax." This is misleading and merge-method-dependent. Squash merge attributes to the merger; rebase merge attributes to the commit author.
 
 ## The Core Question
 
@@ -26,9 +26,12 @@ Notably, `GITHUB_TOKEN` permissions are **not** scoped to the actor — they fol
 
 ## Key Findings
 
-### 1. Actor = push event actor of the last cron syntax change
+### 1. Actor tracks the last cron syntax change (merge-method-dependent)
 
-The cron actor is determined by a single rule: **the push event actor of the last commit that changed a `cron:` expression on the default branch.** Everything else — commit author, committer, PR opener — is irrelevant.
+The cron actor is determined by the last commit that changed a `cron:` expression on the default branch. But **how** it identifies the responsible account depends on the merge method:
+- **Direct push / API**: the pusher
+- **Squash merge**: the push event actor (= the merger)
+- **Rebase merge**: the commit author (NOT the merger)
 
 #### Non-syntax changes don't update the actor
 
@@ -54,26 +57,48 @@ The bot pushed a commit that changed `cron: "*/5 * * * *"` to `cron: "*/7 * * * 
 [Schedule run with bot actor](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236316750) |
 [Previous run with human actor](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25235357865)
 
-#### The author doesn't matter — the merger does
+#### Squash merge: the merger wins
 
-This is the critical disambiguation. When the commit author and the merger differ, **the merger wins**:
+When a PR is squash-merged, the **merger** (push event actor) becomes the cron actor, not the commit author:
 
 | Test | Cron syntax author | Merger (push event actor) | Cron actor | Run |
 |------|-------------------|--------------------------|------------|-----|
 | [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) | `cron-actor-probe[bot]` | `stefanpenner` | **`stefanpenner`** | [25237190498](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25237190498) |
 | [PR #6](https://github.com/stefanpenner-cs/cron-debugging/pull/6) | `stefanpenner` | `cron-actor-probe[bot]` | **`cron-actor-probe[bot]`** | [25237280090](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25237280090) |
 
-PR #5: bot authored the cron change, user merged it. Actor = user.
-PR #6: user authored the cron change, bot merged it. Actor = bot.
+#### Rebase merge: the commit author wins
+
+When a PR is rebase-merged, the **original commit author** becomes the cron actor, NOT the merger:
+
+| Test | Cron syntax author | Merger | Cron actor | Run |
+|------|-------------------|--------|------------|-----|
+| [PR #127](https://github.com/stefanpenner-cs/cron-debugging/pull/127) | `cron-actor-probe[bot]` | `stefanpenner` | **`cron-actor-probe[bot]`** | [25327979376](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327979376) |
+
+The push event for the rebase merge shows `actor: stefanpenner` (verified via events API), but the cron actor became the bot. This means GitHub uses the rebased commit's **author field** for cron actor tracking, not the push event actor.
+
+```sh
+# Push event actor is the merger (stefanpenner):
+gh api repos/stefanpenner-cs/cron-debugging/events --jq \
+  '.[] | select(.type=="PushEvent" and .payload.head[:7]=="ceb52b0") | {actor: .actor.login}'
+# → { "actor": "stefanpenner" }
+
+# But cron actor is the commit author (bot):
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25327979376 \
+  --jq '{actor: .actor.login, actor_type: .actor.type}'
+# → { "actor": "cron-actor-probe[bot]", "actor_type": "Bot" }
+```
+
+**This is a merge-method-dependent behavior:** squash merge → actor is the merger; rebase merge → actor is the commit author.
 
 #### What this rules out
 
 | Hypothesis | Verdict | Evidence |
 |------------|---------|----------|
 | Actor = last pusher to default branch | **RULED OUT** | Bot was last pusher (8903c7b), actor stayed `stefanpenner` |
-| Actor = last commit author on workflow file | **RULED OUT** | Bot was author, actor stayed `stefanpenner` |
+| Actor = last commit author on workflow file | **RULED OUT** | Bot was author (non-syntax change), actor stayed `stefanpenner` |
 | Actor = last commit committer | **RULED OUT** | Committer is always `GitHub` for API/PR merges |
-| Actor = push event actor of last cron syntax change | **CONFIRMED** | PRs #5, #6, and direct push all match this |
+| Actor = push event actor of last cron syntax change | **PARTIAL** | True for squash merge + direct push, but NOT for rebase merge |
+| Actor depends on merge method | **CONFIRMED** | Squash → merger; Rebase → commit author |
 
 ### 2. Bots can become cron actors
 
@@ -135,23 +160,39 @@ A bot-actor schedule run with no `permissions:` block gets full repo-default wri
 [Bot actor run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25236985054) |
 [Bot token test run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25237485693)
 
-### 5. Three identity concepts (and which one matters)
+### 5. Actor tracking is per-file, not per-expression
 
-GitHub tracks three identity concepts per commit. Only one determines the cron actor:
+A workflow file with two cron expressions (`*/10` and `*/11`) was tested. The bot changed only expression A (`*/9` → `*/10`), leaving expression B (`*/11`) untouched. Both expressions fire with `actor: cron-actor-probe[bot]`.
+
+| Expression | Changed by | Actor | Run |
+|-----------|-----------|-------|-----|
+| `*/10` | Bot (*/9→*/10) | `cron-actor-probe[bot]` | [25327979331](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327979331) |
+| `*/11` | Nobody (original) | `cron-actor-probe[bot]` | [25328059618](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25328059618) |
+
+Any push that changes ANY cron expression in a workflow file updates the actor for ALL expressions in that file. Cross-verified: the ownership-test (separate file, unchanged) still shows `actor: stefanpenner`.
+
+### 6. Three identity concepts (and the merge-method twist)
+
+GitHub tracks three identity concepts per commit. Which one determines the cron actor depends on the merge method:
 
 ```
 Git commit
-  ├── author    — who wrote the code (git config)        ← IGNORED for cron actor
-  ├── committer — who applied it ("GitHub" for PR merges) ← IGNORED for cron actor
+  ├── author    — who wrote the code (git config)
+  ├── committer — who applied it ("GitHub" for PR merges)
   │
 Push event
-  └── actor — who triggered the ref update               ← THIS determines cron actor
-              ├── git push         → authenticated user
-              ├── API commit       → the app/bot
-              ├── PR merge by user → the user
-              ├── PR merge by bot  → the bot
-              └── merge queue      → github-merge-queue[bot] (untested)
+  └── actor — who triggered the ref update
+
+For cron actor:
+  ├── git push           → push event actor (the pusher)
+  ├── API commit         → push event actor (the app/bot)
+  ├── squash merge       → push event actor (the merger)    ← merger wins
+  ├── rebase merge       → commit AUTHOR (NOT the merger!)  ← author wins
+  ├── merge commit       → untested (likely push event actor)
+  └── merge queue        → untested (likely github-merge-queue[bot])
 ```
+
+The rebase merge exception is significant: a bot-authored cron change that is rebase-merged by a human makes the **bot** the cron actor, not the human. With squash merge, the **human** would be the actor.
 
 ## Other Observations
 
@@ -171,13 +212,25 @@ Push event
 
 > "Notifications for scheduled workflows are sent to the user who last modified the cron syntax in the workflow file."
 
-True in spirit, but "modified" is ambiguous. It's not the person who authored the change — it's whoever triggered the push event that delivered the change to the default branch.
+True in spirit, but "modified" is ambiguous. For squash merge, it's the merger (push event actor). For rebase merge, it's the original commit author. The distinction matters when author ≠ merger.
 
-Evidence: [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) (bot authored, user merged → actor is user) and [PR #6](https://github.com/stefanpenner-cs/cron-debugging/pull/6) (user authored, bot merged → actor is bot).
+Evidence: [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) (squash: bot authored, user merged → actor = user), [PR #6](https://github.com/stefanpenner-cs/cron-debugging/pull/6) (squash: user authored, bot merged → actor = bot), [PR #127](https://github.com/stefanpenner-cs/cron-debugging/pull/127) (rebase: bot authored, user merged → actor = bot).
 
-### Not yet tested: Reactivation updates the actor
+### Confirmed (with nuance): Reactivation and actor tracking
 
 > "For a deactivated scheduled workflow, if a user with write permissions to the repository makes a commit that changes the cron schedule on the workflow, the workflow will be reactivated, and that user will become the actor."
+
+**Tested.** The workflow was disabled via API. While disabled, the bot pushed a cron syntax change (`*/5` → `*/6`). The workflow did NOT auto-reactivate — it had to be manually re-enabled. After re-enabling, the schedule run showed `actor: cron-actor-probe[bot]`.
+
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25327908440 \
+  --jq '{actor: .actor.login, actor_type: .actor.type, created_at: .created_at}'
+```
+```json
+{ "actor": "cron-actor-probe[bot]", "actor_type": "Bot", "created_at": "2026-05-04T15:30:10Z" }
+```
+
+The docs are right that the cron syntax changer becomes the actor. But the docs imply the workflow auto-reactivates on a cron change — it didn't. The disable/enable cycle is independent of actor tracking. [Run 25327908440](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327908440)
 
 ### 60-day auto-disable is PUBLIC repos only
 
@@ -185,24 +238,29 @@ Evidence: [PR #5](https://github.com/stefanpenner-cs/cron-debugging/pull/5) (bot
 
 The docs say "public repository" — private repos are not subject to this rule.
 
-### Contradicted: Default branch swap does NOT hijack actors
+### Nuanced: Default branch swap affects new schedules, not established ones
 
 > "Certain repository events change the `actor` associated with the workflow. For example, a user who changes the default branch of the repository... becomes `actor` for those scheduled workflows."
 
-**Tested and contradicted.** The bot used `repos.update` to change the default branch from `main` → `temp-default-branch-test` → back to `main`. The next schedule run of `cron-ownership-test.yml` still showed `actor: stefanpenner`.
+**Tested with mixed results.** The bot used `repos.update` to swap the default branch (`main` → `temp-default-branch-test` → back to `main`). Two different outcomes:
 
+**Established workflow (unaffected):** `cron-ownership-test.yml` (running for days) still showed `actor: stefanpenner` after the swap.
 ```sh
-# Run AFTER the bot swapped the default branch (back and forth):
 gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25327441147 \
-  --jq '{actor: .actor.login, actor_type: .actor.type, created_at: .created_at}'
-```
-```json
-{ "actor": "stefanpenner", "actor_type": "User", "created_at": "2026-05-04T15:20:44Z" }
+  --jq '{actor: .actor.login, created_at: .created_at}'
+# → { "actor": "stefanpenner", "created_at": "2026-05-04T15:20:44Z" }
 ```
 
-The bot changed the default branch at ~14:45 UTC. The ownership-test ran at 15:20 UTC with `actor: stefanpenner` unchanged.
+**New workflow (affected):** `cron-default-branch-test.yml` (created at the same time, first schedule run) showed `actor: cron-actor-probe[bot]` — even though the bot never touched this file's cron expression.
+```sh
+gh api repos/stefanpenner-cs/cron-debugging/actions/runs/25327999011 \
+  --jq '{actor: .actor.login, created_at: .created_at}'
+# → { "actor": "cron-actor-probe[bot]", "created_at": "2026-05-04T15:31:54Z" }
+```
 
-**Caveat:** The swap was round-trip (changed and immediately reverted). A one-way permanent change might behave differently. This disproves the docs for the round-trip case but doesn't test a permanent switch.
+The default branch swap appears to affect **newly-registering** schedules but not already-established ones. The bot's default branch change during the initial schedule registration window likely set the actor for unregistered workflows to the bot.
+
+**Caveat:** The 4 new workflows were all created within seconds of the bot's pushes and the default branch swap (~14:44-14:45 UTC). There may be a race condition in GitHub's internal schedule registration that conflated these events.
 
 ### Account status matters, org membership doesn't
 
@@ -243,10 +301,10 @@ GitHub maintains **shadow state** for each cron entry separate from the git hist
 
 ## What's Still Unknown
 
-- [ ] **Is actor per-expression or per-file?** — Our multi-schedule test had the same person write both expressions. Need: two different users each write one expression in the same file.
-- [ ] **Rebase merge commit identity** — Push event actor is always the merger (already proven). But does rebase merge preserve the original commit author like squash does? Matters for git-log auditing, not cron actor.
+- [x] **Is actor per-expression or per-file?** — Per-FILE. Bot changed only expression A (*/9→*/10), left expression B (*/11) unchanged. Both expressions show `actor: cron-actor-probe[bot]`. [*/10 run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327979331) | [*/11 run](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25328059618)
+- [x] **Rebase merge commit identity** — Rebase merge preserves original commit author as cron actor, unlike squash merge where the merger wins. [Run 25327979376](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327979376)
 - [ ] **What happens when the actor loses repo access?** — Do crons stop? Switch to another actor? Continue with degraded permissions?
-- [ ] **Reactivation actor update** — Does re-enabling a disabled workflow with a cron syntax change actually update the actor as docs claim?
+- [x] **Reactivation actor update** — Bot changed cron while disabled, user re-enabled. Actor = bot (cron syntax changer). Workflow did NOT auto-reactivate. [Run 25327908440](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327908440)
 - [x] **Default branch change as actor hijack** — Round-trip swap (main → temp → main) did NOT change the actor. Contradicts docs. Permanent switch untested. [Run 25327441147](https://github.com/stefanpenner-cs/cron-debugging/actions/runs/25327441147)
 - [ ] **Merge queue actor attribution** — The push event actor would be `github-merge-queue[bot]`. If cron actor tracks push event actor, merge queue could silently set crons to a system bot.
 - [ ] **Web UI direct commit to cron syntax** — Confirms baseline: author = user, committer = GitHub, push actor = user.
