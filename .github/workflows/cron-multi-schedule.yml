@@ -3,7 +3,7 @@ name: "Cron: Multi-Schedule"
 on:
   schedule:
     # Two different schedules — test which one fired via github.event.schedule
-    - cron: "*/10 * * * *"
+    - cron: "0,10,20,30,40,50 * * * *"
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
