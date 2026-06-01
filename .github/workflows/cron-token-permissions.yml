@@ -2,7 +2,7 @@ name: "Cron: Token Permission Scope"
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 permissions:
