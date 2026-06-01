@@ -2,7 +2,7 @@ name: "Cron: Ownership Attribution"
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # noop comment, parsed value unchanged
+    - cron: "*/3 * * * *"
   workflow_dispatch: {}
 
 jobs:
